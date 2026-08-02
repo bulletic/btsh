@@ -502,13 +502,13 @@ fn suggest_command(prefix: &str, history: &History) -> Option<String> {
     }
     let last = find_last_word(prefix);
     let show_path = last.contains('/') || last.starts_with('~') || last.starts_with('.') || prefix.contains(' ');
-    if show_path {
+    if let Some(s) = history.suggestion(prefix) {
+        return Some(s);
+    }
+    if show_path && !last.is_empty() {
         if let Some(s) = suggest_path(last) {
             return Some(s);
         }
-    }
-    if let Some(s) = history.suggestion(prefix) {
-        return Some(s);
     }
     for cmd in get_commands().iter() {
         if cmd.starts_with(prefix) && cmd.len() > prefix.len() {
@@ -594,6 +594,7 @@ fn read_line_interactive(prompt: &str, history: &mut History) -> ReadLineResult 
                 break ReadLineResult::Eof;
             }
             Some(Key::Enter) => {
+                out.s(&line[cursor..]);
                 out.s("\x1b[J");
                 out.s("\r\n");
                 out.flush();
