@@ -57,6 +57,10 @@ struct Shell {
     last_cmd: String,
     prev_cmd: String,
     background_job: bool,
+    logging: bool,
+    shit: bool,
+    history: bool,
+    autosuggest: bool,
 }
 
 // =============================================================================
@@ -283,10 +287,15 @@ struct History {
     path: Option<std::path::PathBuf>,
 }
 
+fn history_file() -> std::path::PathBuf {
+    env::var("HOME").ok()
+        .map(|h| Path::new(&h).join(".local").join("share").join("bsh").join("history.txt"))
+        .unwrap_or_else(|| Path::new("/dev/null").to_path_buf())
+}
+
 impl History {
     fn new() -> Self {
-        let path = env::var("HOME").ok()
-            .map(|h| Path::new(&h).join(".local").join("share").join("bsh").join("history.txt"));
+        let path = Some(history_file());
 
         let mut entries = Vec::new();
         if let Some(ref p) = path {
@@ -518,6 +527,14 @@ fn suggest_command(prefix: &str, history: &History) -> Option<String> {
     None
 }
 
+fn suggest_command_opt(prefix: &str, history: &History, suggest: bool) -> Option<String> {
+    if suggest {
+        suggest_command(prefix, history)
+    } else {
+        None
+    }
+}
+
 struct Out {
     buf: String,
 }
@@ -542,7 +559,7 @@ impl Out {
     }
 }
 
-enum ReadLineResult { Line(String), Eof }
+enum ReadLineResult { Line(String), Eof, CtrlC }
 
 fn terminal_width() -> usize {
     unsafe {
@@ -563,7 +580,7 @@ fn input_lines(input_width: usize, term_width: usize) -> usize {
     }
 }
 
-fn read_line_interactive(prompt: &str, history: &mut History) -> ReadLineResult {
+fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> ReadLineResult {
     let prompt_width = prompt_last_line_width(prompt);
     let last_prompt_line = prompt.lines().next_back().unwrap_or("");
     let term_width = terminal_width();
@@ -619,7 +636,7 @@ fn read_line_interactive(prompt: &str, history: &mut History) -> ReadLineResult 
                 if let Some(cl) = close {
                     line.insert(cursor, cl);
                 }
-                suggestion = suggest_command(&line, &history);
+                suggestion = suggest_command_opt(&line, &history, suggest);
                 prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                 out.flush();
             }
@@ -628,7 +645,7 @@ fn read_line_interactive(prompt: &str, history: &mut History) -> ReadLineResult 
                     let prev = line[..cursor].chars().next_back().unwrap();
                     cursor -= prev.len_utf8();
                     line.remove(cursor);
-                    suggestion = suggest_command(&line, &history);
+                    suggestion = suggest_command_opt(&line, &history, suggest);
                     prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                     out.flush();
                 }
@@ -636,7 +653,7 @@ fn read_line_interactive(prompt: &str, history: &mut History) -> ReadLineResult 
             Some(Key::Delete) => {
                 if cursor < line.len() {
                     line.remove(cursor);
-                    suggestion = suggest_command(&line, &history);
+                    suggestion = suggest_command_opt(&line, &history, suggest);
                     prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                     out.flush();
                 }
@@ -660,7 +677,7 @@ fn read_line_interactive(prompt: &str, history: &mut History) -> ReadLineResult 
                         let c = sug.chars().next().unwrap();
                         line.push(c);
                         cursor = line.len();
-                        suggestion = suggest_command(&line, &history);
+                        suggestion = suggest_command_opt(&line, &history, suggest);
                         prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                         out.flush();
                     }
@@ -680,7 +697,7 @@ fn read_line_interactive(prompt: &str, history: &mut History) -> ReadLineResult 
                 if let Some(hist_line) = history.up(&line) {
                     line = hist_line;
                     cursor = line.len();
-                    suggestion = suggest_command(&line, &history);
+                    suggestion = suggest_command_opt(&line, &history, suggest);
                     prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                     out.flush();
                 }
@@ -689,19 +706,16 @@ fn read_line_interactive(prompt: &str, history: &mut History) -> ReadLineResult 
                 if let Some(hist_line) = history.down() {
                     line = hist_line;
                     cursor = line.len();
-                    suggestion = suggest_command(&line, &history);
+                    suggestion = suggest_command_opt(&line, &history, suggest);
                     prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                     out.flush();
                 }
             }
             Some(Key::CtrlC) => {
-                line.clear();
-                cursor = 0;
-                prev_lines = 1;
-                suggestion = None;
                 out.s("\r\x1b[J");
                 out.s(last_prompt_line);
                 out.flush();
+                break ReadLineResult::CtrlC;
             }
             Some(Key::CtrlD) => {
                 if line.is_empty() {
@@ -719,7 +733,7 @@ fn read_line_interactive(prompt: &str, history: &mut History) -> ReadLineResult 
                     if !sug.is_empty() {
                         line.push_str(sug);
                         cursor = line.len();
-                        suggestion = suggest_command(&line, &history);
+                        suggestion = suggest_command_opt(&line, &history, suggest);
                         prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                         out.flush();
                     }
@@ -1448,7 +1462,10 @@ fn expect_word(tokens: &[Token], i: &mut usize) -> Result<String, String> {
 // Builtins
 // =============================================================================
 
-fn is_builtin(cmd: &str) -> bool {
+fn is_builtin(cmd: &str, shell: &Shell) -> bool {
+    if cmd == "shit" && !shell.shit {
+        return false;
+    }
     matches!(cmd, "exit" | "cd" | "pwd" | "echo" | "type" | "export" | "true" | "false" | "rm" | "source" | "." | "alias" | "unalias" | "add_path" | "path" | "shit" | "bshctl")
 }
 
@@ -1491,7 +1508,7 @@ fn exec_builtin(simple: &Simple, shell: &mut Shell) -> i32 {
         "type" => {
             let mut code = 0;
             for name in &simple.args[1..] {
-                if is_builtin(name) {
+                if is_builtin(name, shell) {
                     println!("{name} is a shell builtin");
                 } else if let Some(path) = find_in_path(name) {
                     println!("{name} is {}", path.display());
@@ -1603,6 +1620,63 @@ fn persist_path_to_config(shell: &Shell, dir: &str) {
     }
     out.push_str(&format!("path {dir}\n"));
     std::fs::write(&path, &out).ok();
+}
+
+fn persist_bool_to_config(shell: &Shell, key: &str, enabled: bool) {
+    let path = match shell.config_path {
+        Some(ref p) => p.clone(),
+        None => return,
+    };
+    let line = format!("{key} {}", if enabled { "on" } else { "off" });
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        String::new()
+    });
+    let replaced: Vec<String> = content.lines()
+        .map(|l| {
+            let trimmed = l.trim();
+            if trimmed == format!("{key} on") || trimmed == format!("{key} off") {
+                line.clone()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    let has_existing = content.lines().any(|l| {
+        let t = l.trim();
+        t == format!("{key} on") || t == format!("{key} off")
+    });
+    let mut out = if has_existing {
+        replaced.join("\n")
+    } else if content.is_empty() {
+        format!("{line}\n")
+    } else if content.ends_with('\n') {
+        format!("{content}{line}\n")
+    } else {
+        format!("{content}\n{line}\n")
+    };
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    std::fs::write(&path, &out).ok();
+}
+
+fn persist_logging_to_config(shell: &Shell, enabled: bool) {
+    persist_bool_to_config(shell, "log", enabled);
+}
+
+fn persist_shit_to_config(shell: &Shell, enabled: bool) {
+    persist_bool_to_config(shell, "shit", enabled);
+}
+
+fn persist_history_to_config(shell: &Shell, enabled: bool) {
+    persist_bool_to_config(shell, "history", enabled);
+}
+
+fn persist_autosuggest_to_config(shell: &Shell, enabled: bool) {
+    persist_bool_to_config(shell, "auto-suggestion", enabled);
 }
 
 fn remove_alias_from_config(shell: &Shell, name: &str) {
@@ -2222,15 +2296,11 @@ fn exec_builtin_shit(_simple: &Simple, shell: &mut Shell) -> i32 {
     }
 
     let code = exec_line(&fix, shell);
-    if code != 127 {
+    if code != 127 && shell.history {
         if let Ok(mut h) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(
-                env::var("HOME").ok()
-                    .map(|h| Path::new(&h).join(".local").join("share").join("bsh").join("history.txt"))
-                    .unwrap_or_else(|| Path::new("/dev/null").to_path_buf())
-            )
+            .open(history_file())
         {
             use std::io::Write;
             writeln!(&mut h, "{}", fix).ok();
@@ -2243,7 +2313,7 @@ fn exec_builtin_shit(_simple: &Simple, shell: &mut Shell) -> i32 {
 // bshctl - shell control suite
 // =============================================================================
 
-fn exec_builtin_bshctl(simple: &Simple, _shell: &Shell) -> i32 {
+fn exec_builtin_bshctl(simple: &Simple, shell: &mut Shell) -> i32 {
     if simple.args.len() == 1 {
         println!("  @@@@@@@@@@@@@@@@@@");
         println!(" @                  @@@@");
@@ -2253,8 +2323,391 @@ fn exec_builtin_bshctl(simple: &Simple, _shell: &Shell) -> i32 {
         println!("  @@@@@@@@@@@@@@@@@@@@@@");
         0
     } else {
-        eprintln!("bsh: bshctl: unknown subcommand");
-        1
+        match simple.args[1].as_str() {
+            "enable" => exec_bshctl_enable(&simple.args[2..], shell),
+            "disable" => exec_bshctl_disable(&simple.args[2..], shell),
+            "status" => exec_bshctl_status(&simple.args[2..], shell),
+            "logging" => exec_bshctl_logging(&simple.args[2..], shell),
+            "shit" => exec_bshctl_shit(&simple.args[2..], shell),
+            "history" => exec_bshctl_history(&simple.args[2..], shell),
+            "auto-suggestion" => exec_bshctl_autosuggest(&simple.args[2..], shell),
+            sub => {
+                eprintln!("bsh: bshctl: unknown subcommand: {sub}");
+                1
+            }
+        }
+    }
+}
+
+fn exec_bshctl_enable(args: &[String], shell: &mut Shell) -> i32 {
+    match args {
+        [sub] if sub == "logging" => {
+            shell.logging = true;
+            persist_logging_to_config(shell, true);
+            println!("logging enabled");
+            0
+        }
+        [sub] if sub == "shit" => {
+            shell.shit = true;
+            persist_shit_to_config(shell, true);
+            println!("shit enabled");
+            0
+        }
+        [sub] if sub == "history" => {
+            shell.history = true;
+            persist_history_to_config(shell, true);
+            println!("history enabled");
+            0
+        }
+        [sub] if sub == "auto-suggestion" => {
+            shell.autosuggest = true;
+            persist_autosuggest_to_config(shell, true);
+            println!("auto-suggestion enabled");
+            0
+        }
+        _ => {
+            eprintln!("usage: bshctl enable logging|shit|history|auto-suggestion");
+            1
+        }
+    }
+}
+
+fn exec_bshctl_disable(args: &[String], shell: &mut Shell) -> i32 {
+    match args {
+        [sub] if sub == "logging" => {
+            shell.logging = false;
+            persist_logging_to_config(shell, false);
+            println!("logging disabled");
+            0
+        }
+        [sub] if sub == "shit" => {
+            shell.shit = false;
+            persist_shit_to_config(shell, false);
+            println!("shit disabled");
+            0
+        }
+        [sub] if sub == "history" => {
+            shell.history = false;
+            persist_history_to_config(shell, false);
+            println!("history disabled");
+            0
+        }
+        [sub] if sub == "auto-suggestion" => {
+            shell.autosuggest = false;
+            persist_autosuggest_to_config(shell, false);
+            println!("auto-suggestion disabled");
+            0
+        }
+        _ => {
+            eprintln!("usage: bshctl disable logging|shit|history|auto-suggestion");
+            1
+        }
+    }
+}
+
+fn exec_bshctl_status(args: &[String], shell: &Shell) -> i32 {
+    match args {
+        [sub] if sub == "logging" => {
+            let state = if shell.logging { "enabled" } else { "disabled (default)" };
+            println!("logging: {state}");
+            println!("log file: {DEBUG_LOG}");
+            0
+        }
+        [sub] if sub == "shit" => {
+            let state = if shell.shit { "enabled (default)" } else { "disabled" };
+            println!("shit: {state}");
+            0
+        }
+        [sub] if sub == "history" => {
+            let state = if shell.history { "enabled (default)" } else { "disabled" };
+            println!("history: {state}");
+            0
+        }
+        [sub] if sub == "auto-suggestion" => {
+            let state = if shell.autosuggest { "enabled (default)" } else { "disabled" };
+            println!("auto-suggestion: {state}");
+            0
+        }
+        _ => {
+            eprintln!("usage: bshctl status logging|shit|history|auto-suggestion");
+            1
+        }
+    }
+}
+
+fn exec_bshctl_logging(_args: &[String], shell: &mut Shell) -> i32 {
+    if unsafe { libc::isatty(libc::STDIN_FILENO) == 0 } {
+        eprintln!("bsh: bshctl: logging: interactive-only command");
+        return 1;
+    }
+    println!("type q or exit to exit");
+    let mut history = History { entries: Vec::new(), index: 0, saved: String::new(), path: None };
+    loop {
+        match read_line_interactive("   ? ", &mut history, shell.autosuggest) {
+            ReadLineResult::Line(line) => {
+                let cmd = line.trim();
+                if cmd.is_empty() {
+                    continue;
+                }
+                match cmd {
+                    "help" => bshctl_logging_help(),
+                    "enable" => {
+                        shell.logging = true;
+                        persist_logging_to_config(shell, true);
+                        println!("    ! enabled");
+                    }
+                    "disable" => {
+                        shell.logging = false;
+                        persist_logging_to_config(shell, false);
+                        println!("    ! disabled");
+                    }
+                    "status" => {
+                        println!("    ! {}", if shell.logging { "on" } else { "off" });
+                    }
+                    "clear-file" => bshctl_logging_clear(),
+                    "q" | "exit" | "quit" => break,
+                    other => println!("    ! unknown command: {other}"),
+                }
+            }
+            ReadLineResult::CtrlC | ReadLineResult::Eof => {
+                println!();
+                break;
+            }
+        }
+    }
+    0
+}
+
+fn bshctl_logging_help() {
+    println!("    ! logging commands:");
+    println!("    !   help         show this help");
+    println!("    !   enable       enable logging");
+    println!("    !   disable      disable logging");
+    println!("    !   status       show if on or off");
+    println!("    !   clear-file   delete {DEBUG_LOG}");
+    println!("    !   q / exit     leave this shell");
+}
+
+fn bshctl_logging_clear() {
+    print!("    ! delete {DEBUG_LOG}? [y/n] ");
+    io::stdout().flush().ok();
+    loop {
+        let mut buf = [0u8; 1];
+        let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+        if n != 1 {
+            break;
+        }
+        match buf[0] {
+            b'y' | b'Y' | b'\r' | b'\n' => {
+                std::fs::remove_file(DEBUG_LOG).ok();
+                println!();
+                println!("    ! cleared");
+                break;
+            }
+            b'n' | b'N' => {
+                println!();
+                println!("    ! cancelled");
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn exec_bshctl_shit(_args: &[String], shell: &mut Shell) -> i32 {
+    if unsafe { libc::isatty(libc::STDIN_FILENO) == 0 } {
+        eprintln!("bsh: bshctl: shit: interactive-only command");
+        return 1;
+    }
+    println!("type q or exit to exit");
+    let mut history = History { entries: Vec::new(), index: 0, saved: String::new(), path: None };
+    loop {
+        match read_line_interactive("   ? ", &mut history, shell.autosuggest) {
+            ReadLineResult::Line(line) => {
+                let cmd = line.trim();
+                if cmd.is_empty() {
+                    continue;
+                }
+                match cmd {
+                    "help" => bshctl_shit_help(),
+                    "enable" => {
+                        shell.shit = true;
+                        persist_shit_to_config(shell, true);
+                        println!("    ! enabled");
+                    }
+                    "disable" => {
+                        shell.shit = false;
+                        persist_shit_to_config(shell, false);
+                        println!("    ! disabled");
+                    }
+                    "status" => {
+                        println!("    ! {}", if shell.shit { "on" } else { "off" });
+                    }
+                    "q" | "exit" | "quit" => break,
+                    other => println!("    ! unknown command: {other}"),
+                }
+            }
+            ReadLineResult::CtrlC | ReadLineResult::Eof => {
+                println!();
+                break;
+            }
+        }
+    }
+    0
+}
+
+fn bshctl_shit_help() {
+    println!("    ! shit commands:");
+    println!("    !   help         show this help");
+    println!("    !   enable       enable shit");
+    println!("    !   disable      disable shit");
+    println!("    !   status       show if on or off");
+    println!("    !   q / exit     leave this shell");
+}
+
+fn exec_bshctl_history(_args: &[String], shell: &mut Shell) -> i32 {
+    if unsafe { libc::isatty(libc::STDIN_FILENO) == 0 } {
+        eprintln!("bsh: bshctl: history: interactive-only command");
+        return 1;
+    }
+    println!("type q or exit to exit");
+    let mut history = History { entries: Vec::new(), index: 0, saved: String::new(), path: None };
+    loop {
+        match read_line_interactive("   ? ", &mut history, shell.autosuggest) {
+            ReadLineResult::Line(line) => {
+                let cmd = line.trim();
+                if cmd.is_empty() {
+                    continue;
+                }
+                match cmd {
+                    "help" => bshctl_history_help(),
+                    "enable" => {
+                        shell.history = true;
+                        persist_history_to_config(shell, true);
+                        println!("    ! enabled");
+                    }
+                    "disable" => {
+                        shell.history = false;
+                        persist_history_to_config(shell, false);
+                        println!("    ! disabled");
+                    }
+                    "status" => {
+                        println!("    ! {}", if shell.history { "on" } else { "off" });
+                    }
+                    "clear-file" => bshctl_history_clear(),
+                    "q" | "exit" | "quit" => break,
+                    other => println!("    ! unknown command: {other}"),
+                }
+            }
+            ReadLineResult::CtrlC | ReadLineResult::Eof => {
+                println!();
+                break;
+            }
+        }
+    }
+    0
+}
+
+fn bshctl_history_help() {
+    println!("    ! history commands:");
+    println!("    !   help         show this help");
+    println!("    !   enable       enable history");
+    println!("    !   disable      disable history");
+    println!("    !   status       show if on or off");
+    println!("    !   clear-file   delete the history file");
+    println!("    !   q / exit     leave this shell");
+}
+
+fn bshctl_history_clear() {
+    let path = history_file();
+    print!("    ! delete {}? [y/n] ", path.display());
+    io::stdout().flush().ok();
+    loop {
+        let mut buf = [0u8; 1];
+        let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+        if n != 1 {
+            break;
+        }
+        match buf[0] {
+            b'y' | b'Y' | b'\r' | b'\n' => {
+                std::fs::remove_file(&path).ok();
+                println!();
+                println!("    ! cleared");
+                break;
+            }
+            b'n' | b'N' => {
+                println!();
+                println!("    ! cancelled");
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn exec_bshctl_autosuggest(_args: &[String], shell: &mut Shell) -> i32 {
+    if unsafe { libc::isatty(libc::STDIN_FILENO) == 0 } {
+        eprintln!("bsh: bshctl: auto-suggestion: interactive-only command");
+        return 1;
+    }
+    println!("type q or exit to exit");
+    let mut history = History { entries: Vec::new(), index: 0, saved: String::new(), path: None };
+    loop {
+        match read_line_interactive("   ? ", &mut history, shell.autosuggest) {
+            ReadLineResult::Line(line) => {
+                let cmd = line.trim();
+                if cmd.is_empty() {
+                    continue;
+                }
+                match cmd {
+                    "help" => bshctl_autosuggest_help(),
+                    "enable" => {
+                        shell.autosuggest = true;
+                        persist_autosuggest_to_config(shell, true);
+                        println!("    ! enabled");
+                    }
+                    "disable" => {
+                        shell.autosuggest = false;
+                        persist_autosuggest_to_config(shell, false);
+                        println!("    ! disabled");
+                    }
+                    "status" => {
+                        println!("    ! {}", if shell.autosuggest { "on" } else { "off" });
+                    }
+                    "q" | "exit" | "quit" => break,
+                    other => println!("    ! unknown command: {other}"),
+                }
+            }
+            ReadLineResult::CtrlC | ReadLineResult::Eof => {
+                println!();
+                break;
+            }
+        }
+    }
+    0
+}
+
+fn bshctl_autosuggest_help() {
+    println!("    ! auto-suggestion commands:");
+    println!("    !   help         show this help");
+    println!("    !   enable       enable auto-suggestion");
+    println!("    !   disable      disable auto-suggestion");
+    println!("    !   status       show if on or off");
+    println!("    !   q / exit     leave this shell");
+}
+
+const DEBUG_LOG: &str = "/tmp/bsh_debug.log";
+
+fn log_line(line: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(DEBUG_LOG) {
+        use std::io::Write;
+        writeln!(f, "{line}").ok();
+    }
+}
+
+fn log_command(shell: &Shell, line: &str) {
+    if shell.logging {
+        log_line(line);
     }
 }
 
@@ -2359,7 +2812,7 @@ fn exec_simple(simple: &Simple, shell: &mut Shell) -> i32 {
     let simple = expand_aliases(simple, shell);
 
     let cmd_name = &simple.args[0];
-    if is_builtin(cmd_name) {
+    if is_builtin(cmd_name, shell) {
         return exec_builtin_with_redirects(&simple, shell);
     }
     exec_external(&simple, shell)
@@ -2724,7 +3177,7 @@ fn exec_pipeline_simple(simple: &Simple, shell: &Shell) -> i32 {
     let simple = expand_aliases(simple, shell);
 
     let cmd_name = &simple.args[0];
-    if is_builtin(cmd_name) {
+    if is_builtin(cmd_name, shell) {
         let mut shell_copy = Shell {
             last_exit: shell.last_exit,
             last_bg_pid: shell.last_bg_pid,
@@ -2735,6 +3188,10 @@ fn exec_pipeline_simple(simple: &Simple, shell: &Shell) -> i32 {
             last_cmd: shell.last_cmd.clone(),
             prev_cmd: shell.prev_cmd.clone(),
             background_job: shell.background_job,
+            logging: shell.logging,
+            shit: shell.shit,
+            history: shell.history,
+            autosuggest: shell.autosuggest,
         };
         let mut expanded = Simple {
             args: Vec::new(),
@@ -2837,6 +3294,10 @@ fn reap_background(shell: &mut Shell) {
 // }
 // alias ll="ls -l"
 // path /usr/local/bin
+// log on
+// shit on
+// history on
+// auto-suggestion on
 
 enum ConfigLine {
     Echo(Vec<String>),
@@ -2847,6 +3308,10 @@ struct Config {
     aliases: HashMap<String, String>,
     paths: Vec<String>,
     if_interactive_lines: Vec<String>,
+    logging: bool,
+    shit: bool,
+    history: bool,
+    autosuggest: bool,
 }
 
 fn load_config() -> Option<Config> {
@@ -2863,6 +3328,10 @@ fn load_config() -> Option<Config> {
     let mut aliases = HashMap::new();
     let mut paths = Vec::new();
     let mut if_interactive_lines = Vec::new();
+    let mut logging = false;
+    let mut shit = true;
+    let mut history = true;
+    let mut autosuggest = true;
 
     let mut i = 0;
     while i < lines.len() {
@@ -2906,11 +3375,19 @@ fn load_config() -> Option<Config> {
             if !dir.is_empty() {
                 paths.push(dir.to_string());
             }
+        } else if let Some(val) = line.strip_prefix("log ") {
+            logging = val.trim() == "on";
+        } else if let Some(val) = line.strip_prefix("shit ") {
+            shit = val.trim() == "on";
+        } else if let Some(val) = line.strip_prefix("history ") {
+            history = val.trim() == "on";
+        } else if let Some(val) = line.strip_prefix("auto-suggestion ") {
+            autosuggest = val.trim() == "on";
         }
         i += 1;
     }
 
-    Some(Config { prompt_lines, aliases, paths, if_interactive_lines })
+    Some(Config { prompt_lines, aliases, paths, if_interactive_lines, logging, shit, history, autosuggest })
 }
 
 fn parse_config_line(line: &str) -> Option<ConfigLine> {
@@ -3194,11 +3671,15 @@ fn color_to_ansi(name: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
+    let logging_on = load_config().map(|c| c.logging).unwrap_or(false);
+    let shit_on = load_config().map(|c| c.shit).unwrap_or(true);
+    let history_on = load_config().map(|c| c.history).unwrap_or(true);
+    let autosuggest_on = load_config().map(|c| c.autosuggest).unwrap_or(true);
+
     // Debug: log received args
-    let args_debug: Vec<String> = args.iter().enumerate().map(|(i, a)| format!("[{}]={}", i, a)).collect();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/bsh_debug.log") {
-        use std::io::Write;
-        writeln!(f, "args: {:?}", args_debug).ok();
+    if logging_on {
+        let args_debug: Vec<String> = args.iter().enumerate().map(|(i, a)| format!("[{}]={}", i, a)).collect();
+        log_line(&format!("args: {:?}", args_debug));
     }
 
     // -c <command>: execute command and exit (non-interactive)
@@ -3216,6 +3697,10 @@ fn main() {
             last_cmd: String::new(),
             prev_cmd: String::new(),
             background_job: false,
+            logging: logging_on,
+            shit: shit_on,
+            history: history_on,
+            autosuggest: autosuggest_on,
         };
         if let Some(ref cfg) = load_config() {
             for (name, value) in &cfg.aliases {
@@ -3241,6 +3726,7 @@ fn main() {
         let cmd = &args[2];
         shell.last_cmd = cmd.to_string();
         let code = exec_line(cmd, &mut shell);
+        log_command(&shell, cmd);
         process::exit(code);
     }
 
@@ -3269,6 +3755,10 @@ fn main() {
         last_cmd: String::new(),
         prev_cmd: String::new(),
         background_job: false,
+        logging: logging_on,
+        shit: shit_on,
+        history: history_on,
+        autosuggest: autosuggest_on,
     };
 
     let config = load_config();
@@ -3318,8 +3808,12 @@ fn main() {
             } else {
                 render_prompt(&shell)
             };
-            match read_line_interactive(&prompt, &mut history) {
+            match read_line_interactive(&prompt, &mut history, shell.autosuggest) {
                 ReadLineResult::Line(l) => l,
+                ReadLineResult::CtrlC => {
+                    shell.last_exit = 130;
+                    continue;
+                }
                 ReadLineResult::Eof => break,
             }
         } else {
@@ -3338,8 +3832,9 @@ fn main() {
 
         shell.prev_cmd = std::mem::replace(&mut shell.last_cmd, trimmed.to_string());
         shell.last_exit = exec_line(trimmed, &mut shell);
+        log_command(&shell, trimmed);
 
-        if !trimmed.starts_with('#') && shell.last_exit != 127 {
+        if shell.history && !trimmed.starts_with('#') && shell.last_exit != 127 {
             history.add(trimmed);
         }
     }
