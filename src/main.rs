@@ -61,6 +61,7 @@ struct Shell {
     shit: bool,
     history: bool,
     autosuggest: bool,
+    fresh: bool,
 }
 
 // =============================================================================
@@ -294,6 +295,10 @@ fn history_file() -> std::path::PathBuf {
 }
 
 impl History {
+    fn empty() -> Self {
+        History { entries: Vec::new(), index: 0, saved: String::new(), path: None }
+    }
+
     fn new() -> Self {
         let path = Some(history_file());
 
@@ -2296,7 +2301,7 @@ fn exec_builtin_shit(_simple: &Simple, shell: &mut Shell) -> i32 {
     }
 
     let code = exec_line(&fix, shell);
-    if code != 127 && shell.history {
+    if code != 127 && shell.history && !shell.fresh {
         if let Ok(mut h) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -2331,6 +2336,7 @@ fn exec_builtin_bshctl(simple: &Simple, shell: &mut Shell) -> i32 {
             "shit" => exec_bshctl_shit(&simple.args[2..], shell),
             "history" => exec_bshctl_history(&simple.args[2..], shell),
             "auto-suggestion" => exec_bshctl_autosuggest(&simple.args[2..], shell),
+            "--fresh" => exec_bshctl_shell(&simple.args[2..], shell),
             sub => {
                 eprintln!("bsh: bshctl: unknown subcommand: {sub}");
                 1
@@ -2685,6 +2691,42 @@ fn exec_bshctl_autosuggest(_args: &[String], shell: &mut Shell) -> i32 {
         }
     }
     0
+}
+
+fn exec_bshctl_shell(_args: &[String], shell: &Shell) -> i32 {
+    if unsafe { libc::isatty(libc::STDIN_FILENO) == 0 } {
+        eprintln!("bsh: bshctl: --fresh: interactive-only command");
+        return 1;
+    }
+    let flag = "--fresh";
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("bsh: bshctl: {flag}: {e}");
+            return 1;
+        }
+    };
+    let mut cmd = Command::new(&exe);
+    cmd.arg(flag);
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    prepare_job_terminal(shell);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("bsh: bshctl: {flag}: {e}");
+            restore_shell_terminal(shell);
+            return 1;
+        }
+    };
+    let status = child.wait().unwrap_or_else(|_| process::ExitStatus::default());
+    restore_shell_terminal(shell);
+    exit_status_code(status)
 }
 
 fn bshctl_autosuggest_help() {
@@ -3192,6 +3234,7 @@ fn exec_pipeline_simple(simple: &Simple, shell: &Shell) -> i32 {
             shit: shell.shit,
             history: shell.history,
             autosuggest: shell.autosuggest,
+            fresh: shell.fresh,
         };
         let mut expanded = Simple {
             args: Vec::new(),
@@ -3671,10 +3714,18 @@ fn color_to_ansi(name: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let logging_on = load_config().map(|c| c.logging).unwrap_or(false);
-    let shit_on = load_config().map(|c| c.shit).unwrap_or(true);
-    let history_on = load_config().map(|c| c.history).unwrap_or(true);
-    let autosuggest_on = load_config().map(|c| c.autosuggest).unwrap_or(true);
+    let fresh = args.len() >= 2 && args[1] == "--fresh";
+
+    let (logging_on, shit_on, history_on, autosuggest_on) = if fresh {
+        (false, true, true, true)
+    } else {
+        (
+            load_config().map(|c| c.logging).unwrap_or(false),
+            load_config().map(|c| c.shit).unwrap_or(true),
+            load_config().map(|c| c.history).unwrap_or(true),
+            load_config().map(|c| c.autosuggest).unwrap_or(true),
+        )
+    };
 
     // Debug: log received args
     if logging_on {
@@ -3693,7 +3744,7 @@ fn main() {
             running_bg: Vec::new(),
             vars: HashMap::new(),
             aliases: HashMap::new(),
-            config_path: config_path.clone(),
+        config_path: if fresh { None } else { config_path.clone() },
             last_cmd: String::new(),
             prev_cmd: String::new(),
             background_job: false,
@@ -3701,6 +3752,7 @@ fn main() {
             shit: shit_on,
             history: history_on,
             autosuggest: autosuggest_on,
+            fresh: false,
         };
         if let Some(ref cfg) = load_config() {
             for (name, value) in &cfg.aliases {
@@ -3759,9 +3811,10 @@ fn main() {
         shit: shit_on,
         history: history_on,
         autosuggest: autosuggest_on,
+        fresh,
     };
 
-    let config = load_config();
+    let config = if fresh { None } else { load_config() };
     if let Some(ref cfg) = config {
         for (name, value) in &cfg.aliases {
             shell.aliases.insert(name.clone(), value.clone());
@@ -3792,7 +3845,7 @@ fn main() {
         }
     }
 
-    let mut history = History::new();
+    let mut history = if fresh { History::empty() } else { History::new() };
 
     loop {
         if sigint_pending() {
