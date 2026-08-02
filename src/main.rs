@@ -2337,12 +2337,31 @@ fn exec_builtin_bshctl(simple: &Simple, shell: &mut Shell) -> i32 {
             "history" => exec_bshctl_history(&simple.args[2..], shell),
             "auto-suggestion" => exec_bshctl_autosuggest(&simple.args[2..], shell),
             "--fresh" => exec_bshctl_shell(&simple.args[2..], shell),
+            "--help" => exec_bshctl_help(),
             sub => {
                 eprintln!("bsh: bshctl: unknown subcommand: {sub}");
                 1
             }
         }
     }
+}
+
+fn exec_bshctl_help() -> i32 {
+    println!("bsh version {}", env!("CARGO_PKG_VERSION"));
+    println!("Usage: bshctl (command) {{argument}}");
+    println!("Commands:");
+    println!("┝ --help # prints this");
+    println!("┝ --fresh # opens a shell that doesn't read your command history or config file ");
+    println!("┝ enable + argument # enables that feature");
+    println!("┝ disable + argument # disables that feature");
+    println!("┝ featurename # opens a sub-shell to configure that feature");
+    println!("┕ status + argument # shows status of a command");
+    println!("Features:");
+    println!("┝ logging, off by default, logs commands for debugging(at /tmp/bsh_debug.log)");
+    println!("┝ auto-suggestion, on by default, suggest command or path completions");
+    println!("┝ history, on by default, saves commands to history");
+    println!("┕ shit, on by default, if launched it tries to correct the last command");
+    0
 }
 
 fn exec_bshctl_enable(args: &[String], shell: &mut Shell) -> i32 {
