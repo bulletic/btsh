@@ -1046,6 +1046,15 @@ impl<'a> Tokenizer<'a> {
 
 fn expand_word(word: &str, shell: &Shell) -> Vec<String> {
     let mut results = Vec::new();
+    for braced in brace_expand(word) {
+        results.extend(expand_word_no_brace(&braced, shell));
+    }
+    expand_globs(&mut results);
+    results
+}
+
+fn expand_word_no_brace(word: &str, shell: &Shell) -> Vec<String> {
+    let mut results = Vec::new();
     let mut current = String::new();
 
     let mut chars = word.chars().peekable();
@@ -1124,8 +1133,295 @@ fn expand_word(word: &str, shell: &Shell) -> Vec<String> {
     if results.is_empty() {
         results.push(String::new());
     }
-    expand_globs(&mut results);
     results
+}
+
+fn brace_expand(input: &str) -> Vec<String> {
+    brace_expand_rec(input)
+}
+
+fn brace_expand_rec(s: &str) -> Vec<String> {
+    let open = match find_brace_open(s) {
+        Some(i) => i,
+        None => return vec![s.to_string()],
+    };
+    let close = match find_matching_brace(s, open) {
+        Some(j) => j,
+        None => return vec![s.to_string()],
+    };
+    let content = &s[open + 1..close];
+
+    let alts: Option<Vec<String>> = if let Some(seq) = brace_sequence(content) {
+        Some(seq)
+    } else {
+        let parts = split_top_level(content, ',');
+        if parts.len() >= 2 {
+            Some(parts)
+        } else {
+            None
+        }
+    };
+
+    match alts {
+        Some(parts) => {
+            let prefix = &s[..open];
+            let suffix = &s[close + 1..];
+            let mut results = Vec::new();
+            for part in parts {
+                let word = format!("{}{}{}", prefix, part, suffix);
+                results.extend(brace_expand_rec(&word));
+            }
+            results
+        }
+        None => {
+            let mut results = Vec::new();
+            for rest in brace_expand_rec(&s[open + 1..]) {
+                results.push(format!("{}{}{}", &s[..open], "{", rest));
+            }
+            results
+        }
+    }
+}
+
+fn find_brace_open(s: &str) -> Option<usize> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut idx = 0;
+    for c in s.chars() {
+        if escaped {
+            escaped = false;
+            idx += c.len_utf8();
+            continue;
+        }
+        if in_single {
+            if c == '\'' {
+                in_single = false;
+            }
+            idx += c.len_utf8();
+            continue;
+        }
+        if in_double {
+            if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_double = false;
+            }
+            idx += c.len_utf8();
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '{' => return Some(idx),
+            _ => {}
+        }
+        idx += c.len_utf8();
+    }
+    None
+}
+
+fn find_matching_brace(s: &str, open: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut idx = open + 1;
+    for c in s[open + 1..].chars() {
+        if escaped {
+            escaped = false;
+            idx += c.len_utf8();
+            continue;
+        }
+        if in_single {
+            if c == '\'' {
+                in_single = false;
+            }
+            idx += c.len_utf8();
+            continue;
+        }
+        if in_double {
+            if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_double = false;
+            }
+            idx += c.len_utf8();
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+        idx += c.len_utf8();
+    }
+    None
+}
+
+fn split_top_level(s: &str, delim: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for c in s.chars() {
+        if escaped {
+            current.push(c);
+            escaped = false;
+            continue;
+        }
+        if in_single {
+            current.push(c);
+            if c == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            current.push(c);
+            if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        match c {
+            '\\' => {
+                current.push(c);
+                escaped = true;
+            }
+            '\'' => {
+                current.push(c);
+                in_single = true;
+            }
+            '"' => {
+                current.push(c);
+                in_double = true;
+            }
+            '{' => {
+                current.push(c);
+                depth += 1;
+            }
+            '}' => {
+                current.push(c);
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            c if c == delim && depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+            }
+            _ => current.push(c),
+        }
+    }
+    parts.push(current);
+    parts
+}
+
+fn brace_sequence(content: &str) -> Option<Vec<String>> {
+    let parts: Vec<&str> = content.split("..").collect();
+    match parts.len() {
+        2 => seq_range(parts[0], parts[1], None),
+        3 => seq_range(parts[0], parts[1], Some(parts[2])),
+        _ => None,
+    }
+}
+
+fn seq_range(start: &str, end: &str, step: Option<&str>) -> Option<Vec<String>> {
+    const MAX_ITEMS: usize = 100_000;
+
+    if let (Ok(s), Ok(e)) = (start.parse::<i128>(), end.parse::<i128>()) {
+        let step = step.and_then(|s| s.parse::<i128>().ok()).unwrap_or(1);
+        if step == 0 {
+            return None;
+        }
+        let mut out = Vec::new();
+        if s <= e {
+            if step < 0 {
+                return None;
+            }
+            let mut v = s;
+            while v <= e {
+                if out.len() >= MAX_ITEMS {
+                    return None;
+                }
+                out.push(v.to_string());
+                v += step;
+            }
+        } else {
+            let step = if step < 0 { step } else { -step };
+            let mut v = s;
+            while v >= e {
+                if out.len() >= MAX_ITEMS {
+                    return None;
+                }
+                out.push(v.to_string());
+                v += step;
+            }
+        }
+        if start.starts_with('0') || end.starts_with('0') {
+            let width = start.len().max(end.len());
+            out = out.into_iter()
+                .map(|v| format!("{:0>width$}", v, width = width))
+                .collect();
+        }
+        return Some(out);
+    }
+
+    if start.chars().count() == 1 && end.chars().count() == 1 {
+        let s = start.chars().next().unwrap();
+        let e = end.chars().next().unwrap();
+        let step = step.and_then(|s| s.parse::<i64>().ok()).unwrap_or(1);
+        if step == 0 {
+            return None;
+        }
+        let mut out = Vec::new();
+        let next = |c: u32| char::from_u32(c);
+        if s <= e {
+            if step < 0 {
+                return None;
+            }
+            let mut c = s as u32;
+            while let Some(ch) = next(c) {
+                if ch > e {
+                    break;
+                }
+                if out.len() >= MAX_ITEMS {
+                    return None;
+                }
+                out.push(ch.to_string());
+                c += step as u32;
+            }
+        } else {
+            let step = if step < 0 { step } else { -step };
+            let mut c = s as u32;
+            while let Some(ch) = next(c) {
+                if ch < e {
+                    break;
+                }
+                if out.len() >= MAX_ITEMS {
+                    return None;
+                }
+                out.push(ch.to_string());
+                c = (c as i64 + step) as u32;
+            }
+        }
+        return Some(out);
+    }
+
+    None
 }
 
 fn expand_globs(results: &mut Vec<String>) {
@@ -3913,5 +4209,87 @@ fn main() {
 
     if let Some(orig) = orig_termios {
         disable_raw_mode(&orig);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expand(input: &str) -> Vec<String> {
+        brace_expand(input)
+    }
+
+    #[test]
+    fn alternatives() {
+        assert_eq!(expand("{a,b,c}"), vec!["a", "b", "c"]);
+        assert_eq!(expand("x{a,b}y"), vec!["xay", "xby"]);
+        assert_eq!(expand("bullets/{btsh,bulletty}/src/main.rs"), vec![
+            "bullets/btsh/src/main.rs",
+            "bullets/bulletty/src/main.rs",
+        ]);
+    }
+
+    #[test]
+    fn multiple_groups() {
+        assert_eq!(expand("{a,b}{1,2}"), vec!["a1", "a2", "b1", "b2"]);
+    }
+
+    #[test]
+    fn nested() {
+        assert_eq!(expand("{a,{b,c}}"), vec!["a", "b", "c"]);
+        assert_eq!(expand("pre{a,{b,c}}post"), vec!["preapost", "prebpost", "precpost"]);
+    }
+
+    #[test]
+    fn integer_ranges() {
+        assert_eq!(expand("{1..3}"), vec!["1", "2", "3"]);
+        assert_eq!(expand("{3..1}"), vec!["3", "2", "1"]);
+        assert_eq!(expand("{-2..2}"), vec!["-2", "-1", "0", "1", "2"]);
+        assert_eq!(expand("file{1..3}.rs"), vec!["file1.rs", "file2.rs", "file3.rs"]);
+        assert_eq!(expand("{1..9..2}"), vec!["1", "3", "5", "7", "9"]);
+        assert_eq!(expand("{9..1..2}"), vec!["9", "7", "5", "3", "1"]);
+        assert_eq!(expand("{09..11}"), vec!["09", "10", "11"]);
+    }
+
+    #[test]
+    fn char_ranges() {
+        assert_eq!(expand("{a..e}"), vec!["a", "b", "c", "d", "e"]);
+        assert_eq!(expand("{e..a}"), vec!["e", "d", "c", "b", "a"]);
+        assert_eq!(expand("{a..z..3}"), vec!["a", "d", "g", "j", "m", "p", "s", "v", "y"]);
+    }
+
+    #[test]
+    fn invalid_groups_stay_literal() {
+        assert_eq!(expand("{b}"), vec!["{b}"]);
+        assert_eq!(expand("a{b}c"), vec!["a{b}c"]);
+        assert_eq!(expand("{a"), vec!["{a"]);
+        assert_eq!(expand("{a,b"), vec!["{a,b"]);
+        assert_eq!(expand("a}b"), vec!["a}b"]);
+    }
+
+    #[test]
+    fn invalid_outer_but_valid_inner() {
+        assert_eq!(expand("{a{b,c}}"), vec!["{ab}", "{ac}"]);
+        assert_eq!(expand("{a}{b,c}"), vec!["{a}b", "{a}c"]);
+    }
+
+    #[test]
+    fn quoted_and_escaped() {
+        assert_eq!(expand("'{a,b}'"), vec!["'{a,b}'"]);
+        assert_eq!(expand("\"{a,b}\""), vec!["\"{a,b}\""]);
+        assert_eq!(expand("\\{a,b\\}"), vec!["\\{a,b\\}"]);
+    }
+
+    #[test]
+    fn quoted_comma_does_not_split() {
+        assert_eq!(expand("{a,\"b,c\"}"), vec!["a", "\"b,c\""]);
+        assert_eq!(expand("{a,'b,c'}"), vec!["a", "'b,c'"]);
+    }
+
+    #[test]
+    fn no_braces() {
+        assert_eq!(expand("plain word"), vec!["plain word"]);
+        assert_eq!(expand(""), vec![""]);
     }
 }

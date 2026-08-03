@@ -11,7 +11,8 @@ where a shell should just be a shell.
 
 Command and path completion(tab for full accept + right key for one character accept), history navigation with the up/down arrow keys, inline
 autosuggestions, auto-closing quotes and brackets, piping, chaining
-(`&&`, `||`), background jobs (`&`), and full redirect support (`>`, `>>`,
+(`&&`, `||`), background jobs (`&`), brace expansion
+(`{a,b,c}` and `{1..10}` ranges), and full redirect support (`>`, `>>`,
 `<`, `<>`, `>&`, `<&`, `&>`, and numbered fd redirects like `2>file`).
 
 It ships with the usual builtins (`cd`, `pwd`, `echo`, `export`, `alias`,
