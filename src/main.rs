@@ -290,7 +290,7 @@ struct History {
 
 fn history_file() -> std::path::PathBuf {
     env::var("HOME").ok()
-        .map(|h| Path::new(&h).join(".local").join("share").join("bsh").join("history.txt"))
+        .map(|h| Path::new(&h).join(".local").join("share").join("btsh").join("history.txt"))
         .unwrap_or_else(|| Path::new("/dev/null").to_path_buf())
 }
 
@@ -1471,7 +1471,7 @@ fn is_builtin(cmd: &str, shell: &Shell) -> bool {
     if cmd == "shit" && !shell.shit {
         return false;
     }
-    matches!(cmd, "exit" | "cd" | "pwd" | "echo" | "type" | "export" | "true" | "false" | "rm" | "source" | "." | "alias" | "unalias" | "add_path" | "path" | "shit" | "bshctl")
+    matches!(cmd, "exit" | "cd" | "pwd" | "echo" | "type" | "export" | "true" | "false" | "rm" | "source" | "." | "alias" | "unalias" | "add_path" | "path" | "shit" | "btshctl")
 }
 
 fn exec_builtin(simple: &Simple, shell: &mut Shell) -> i32 {
@@ -1493,7 +1493,7 @@ fn exec_builtin(simple: &Simple, shell: &mut Shell) -> i32 {
                         println!("{}", cwd.display());
                         0
                     }
-                    Err(_) => { eprintln!("bsh: cd: OLDPWD not set"); 1 }
+                    Err(_) => { eprintln!("btsh: cd: OLDPWD not set"); 1 }
                 }
             } else {
                 expand_tilde_cd(target, shell)
@@ -1502,7 +1502,7 @@ fn exec_builtin(simple: &Simple, shell: &mut Shell) -> i32 {
         "pwd" => {
             match env::current_dir() {
                 Ok(dir) => { println!("{}", dir.display()); 0 }
-                Err(e) => { eprintln!("bsh: pwd: {e}"); 1 }
+                Err(e) => { eprintln!("btsh: pwd: {e}"); 1 }
             }
         }
         "echo" => {
@@ -1518,7 +1518,7 @@ fn exec_builtin(simple: &Simple, shell: &mut Shell) -> i32 {
                 } else if let Some(path) = find_in_path(name) {
                     println!("{name} is {}", path.display());
                 } else {
-                    eprintln!("bsh: type: {name}: not found");
+                    eprintln!("btsh: type: {name}: not found");
                     code = 1;
                 }
             }
@@ -1534,7 +1534,7 @@ fn exec_builtin(simple: &Simple, shell: &mut Shell) -> i32 {
         }
         "source" | "." => exec_builtin_source(simple, shell),
         "shit" => exec_builtin_shit(simple, shell),
-        "bshctl" => exec_builtin_bshctl(simple, shell),
+        "btshctl" => exec_builtin_btshctl(simple, shell),
         "rm" => exec_builtin_rm(simple, shell),
         "alias" => exec_builtin_alias(simple, shell),
         "unalias" => exec_builtin_unalias(simple, shell),
@@ -1718,7 +1718,7 @@ fn exec_builtin_alias(simple: &Simple, shell: &mut Shell) -> i32 {
         } else {
             match shell.aliases.get(arg) {
                 Some(val) => println!("alias {}={}", arg, shell_quote(val)),
-                None => eprintln!("bsh: alias: {arg}: not found"),
+                None => eprintln!("btsh: alias: {arg}: not found"),
             }
         }
     }
@@ -1744,7 +1744,7 @@ fn exec_builtin_unalias(simple: &Simple, shell: &mut Shell) -> i32 {
         if shell.aliases.remove(arg).is_some() {
             remove_alias_from_config(shell, arg);
         } else {
-            eprintln!("bsh: unalias: {arg}: not found");
+            eprintln!("btsh: unalias: {arg}: not found");
             code = 1;
         }
     }
@@ -1823,7 +1823,7 @@ fn exec_builtin_rm(simple: &Simple, _shell: &Shell) -> i32 {
     }
 
     if files.is_empty() {
-        eprintln!("bsh: rm: missing operand");
+        eprintln!("btsh: rm: missing operand");
         return 1;
     }
 
@@ -1838,12 +1838,12 @@ fn exec_builtin_rm(simple: &Simple, _shell: &Shell) -> i32 {
 
     'file: for file in &files {
         if !Path::new(file).exists() {
-            eprintln!("bsh: rm: {file}: No such file");
+            eprintln!("btsh: rm: {file}: No such file");
             continue;
         }
         if interactive {
             let suffix = if Path::new(file).is_dir() { "directory" } else { "regular file" };
-            print!("bsh: rm: remove {suffix} '{file}'? [y/n] ");
+            print!("btsh: rm: remove {suffix} '{file}'? [y/n] ");
             io::stdout().flush().ok();
             loop {
                 let mut buf = [0u8; 1];
@@ -1866,7 +1866,7 @@ fn delete_path(path: &str, recursive: bool) {
         if recursive {
             std::fs::remove_dir_all(path).ok();
         } else {
-            eprintln!("bsh: rm: {path}: is a directory");
+            eprintln!("btsh: rm: {path}: is a directory");
         }
     } else {
         std::fs::remove_file(path).ok();
@@ -1878,20 +1878,20 @@ fn exec_builtin_source(simple: &Simple, shell: &mut Shell) -> i32 {
         Some(f) if f == "-d" || f == "--default" => {
             let home = match env::var("HOME") {
                 Ok(h) => h,
-                Err(_) => { eprintln!("bsh: source: HOME not set"); return 1; }
+                Err(_) => { eprintln!("btsh: source: HOME not set"); return 1; }
             };
-            Path::new(&home).join(".config").join("bsh").join("config")
+            Path::new(&home).join(".config").join("btsh").join("config")
         }
         Some(f) => Path::new(f).to_path_buf(),
         None => {
-            eprintln!("bsh: source: missing filename");
+            eprintln!("btsh: source: missing filename");
             return 1;
         }
     };
     let contents = match std::fs::read_to_string(&file) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("bsh: source: {}: {e}", file.display());
+            eprintln!("btsh: source: {}: {e}", file.display());
             return 1;
         }
     };
@@ -1943,28 +1943,28 @@ fn exec_builtin_with_redirects(simple: &Simple, shell: &mut Shell) -> i32 {
             RedirectKind::In => {
                 let fd = match File::open(&target) {
                     Ok(f) => f.into_raw_fd(),
-                    Err(e) => { eprintln!("bsh: {target}: {e}"); return 1; }
+                    Err(e) => { eprintln!("btsh: {target}: {e}"); return 1; }
                 };
                 unsafe { libc::dup2(fd, redir.fd); libc::close(fd); }
             }
             RedirectKind::Out => {
                 let fd = match File::create(&target) {
                     Ok(f) => f.into_raw_fd(),
-                    Err(e) => { eprintln!("bsh: {target}: {e}"); return 1; }
+                    Err(e) => { eprintln!("btsh: {target}: {e}"); return 1; }
                 };
                 unsafe { libc::dup2(fd, redir.fd); libc::close(fd); }
             }
             RedirectKind::Append => {
                 let fd = match OpenOptions::new().append(true).create(true).open(&target) {
                     Ok(f) => f.into_raw_fd(),
-                    Err(e) => { eprintln!("bsh: {target}: {e}"); return 1; }
+                    Err(e) => { eprintln!("btsh: {target}: {e}"); return 1; }
                 };
                 unsafe { libc::dup2(fd, redir.fd); libc::close(fd); }
             }
             RedirectKind::DupOut | RedirectKind::DupIn => {
                 let tfd: i32 = target.parse().unwrap_or(-1);
                 if tfd < 0 {
-                    eprintln!("bsh: {}: invalid file descriptor", target);
+                    eprintln!("btsh: {}: invalid file descriptor", target);
                     return 1;
                 }
                 unsafe { libc::dup2(tfd, redir.fd); }
@@ -2012,7 +2012,7 @@ fn expand_tilde_cd(target: &str, _shell: &mut Shell) -> i32 {
             unsafe { env::set_var("OLDPWD", old_cwd.to_string_lossy().as_ref()); }
             0
         }
-        Err(e) => { eprintln!("bsh: cd: {target}: {e}"); 1 }
+        Err(e) => { eprintln!("btsh: cd: {target}: {e}"); 1 }
     }
 }
 
@@ -2244,7 +2244,7 @@ fn shit_rule_common_typos(cmd: &ShitCommand, _shell: &Shell) -> Option<String> {
 
 fn exec_builtin_shit(_simple: &Simple, shell: &mut Shell) -> i32 {
     if shell.prev_cmd.is_empty() {
-        eprintln!("bsh: shit: no previous command");
+        eprintln!("btsh: shit: no previous command");
         return 1;
     }
     let last = &shell.prev_cmd;
@@ -2281,12 +2281,12 @@ fn exec_builtin_shit(_simple: &Simple, shell: &mut Shell) -> i32 {
     let fix = match correction {
         Some(f) => f,
         None => {
-            eprintln!("bsh: shit: no correction found for: {}", last);
+            eprintln!("btsh: shit: no correction found for: {}", last);
             return 1;
         }
     };
 
-    eprint!("bsh: shit: {} ? [y/n] ", fix);
+    eprint!("btsh: shit: {} ? [y/n] ", fix);
     io::stderr().flush().ok();
 
     loop {
@@ -2315,40 +2315,40 @@ fn exec_builtin_shit(_simple: &Simple, shell: &mut Shell) -> i32 {
 }
 
 // =============================================================================
-// bshctl - shell control suite
+// btshctl - shell control suite
 // =============================================================================
 
-fn exec_builtin_bshctl(simple: &Simple, shell: &mut Shell) -> i32 {
+fn exec_builtin_btshctl(simple: &Simple, shell: &mut Shell) -> i32 {
     if simple.args.len() == 1 {
         println!("  @@@@@@@@@@@@@@@@@@");
         println!(" @                  @@@@");
-        println!(" @    $bsh{}         @", env!("CARGO_PKG_VERSION"));
+        println!(" @    $btsh{}         @", env!("CARGO_PKG_VERSION"));
         println!(" @                       @@");
         println!(" @                      @");
         println!("  @@@@@@@@@@@@@@@@@@@@@@");
         0
     } else {
         match simple.args[1].as_str() {
-            "enable" => exec_bshctl_enable(&simple.args[2..], shell),
-            "disable" => exec_bshctl_disable(&simple.args[2..], shell),
-            "status" => exec_bshctl_status(&simple.args[2..], shell),
-            "logging" => exec_bshctl_logging(&simple.args[2..], shell),
-            "shit" => exec_bshctl_shit(&simple.args[2..], shell),
-            "history" => exec_bshctl_history(&simple.args[2..], shell),
-            "auto-suggestion" => exec_bshctl_autosuggest(&simple.args[2..], shell),
-            "--fresh" => exec_bshctl_shell(&simple.args[2..], shell),
-            "--help" => exec_bshctl_help(),
+            "enable" => exec_btshctl_enable(&simple.args[2..], shell),
+            "disable" => exec_btshctl_disable(&simple.args[2..], shell),
+            "status" => exec_btshctl_status(&simple.args[2..], shell),
+            "logging" => exec_btshctl_logging(&simple.args[2..], shell),
+            "shit" => exec_btshctl_shit(&simple.args[2..], shell),
+            "history" => exec_btshctl_history(&simple.args[2..], shell),
+            "auto-suggestion" => exec_btshctl_autosuggest(&simple.args[2..], shell),
+            "--fresh" => exec_btshctl_shell(&simple.args[2..], shell),
+            "--help" => exec_btshctl_help(),
             sub => {
-                eprintln!("bsh: bshctl: unknown subcommand: {sub}");
+                eprintln!("btsh: btshctl: unknown subcommand: {sub}");
                 1
             }
         }
     }
 }
 
-fn exec_bshctl_help() -> i32 {
-    println!("bsh version {}", env!("CARGO_PKG_VERSION"));
-    println!("Usage: bshctl (command) {{argument}}");
+fn exec_btshctl_help() -> i32 {
+    println!("btsh version {}", env!("CARGO_PKG_VERSION"));
+    println!("Usage: btshctl (command) {{argument}}");
     println!("Commands:");
     println!("┝ --help # prints this");
     println!("┝ --fresh # opens a shell that doesn't read your command history or config file ");
@@ -2357,14 +2357,14 @@ fn exec_bshctl_help() -> i32 {
     println!("┝ featurename # opens a sub-shell to configure that feature");
     println!("┕ status + argument # shows status of a command");
     println!("Features:");
-    println!("┝ logging, off by default, logs commands for debugging(at /tmp/bsh_debug.log)");
+    println!("┝ logging, off by default, logs commands for debugging(at /tmp/btsh_debug.log)");
     println!("┝ auto-suggestion, on by default, suggest command or path completions");
     println!("┝ history, on by default, saves commands to history");
     println!("┕ shit, on by default, if launched it tries to correct the last command");
     0
 }
 
-fn exec_bshctl_enable(args: &[String], shell: &mut Shell) -> i32 {
+fn exec_btshctl_enable(args: &[String], shell: &mut Shell) -> i32 {
     match args {
         [sub] if sub == "logging" => {
             shell.logging = true;
@@ -2391,13 +2391,13 @@ fn exec_bshctl_enable(args: &[String], shell: &mut Shell) -> i32 {
             0
         }
         _ => {
-            eprintln!("usage: bshctl enable logging|shit|history|auto-suggestion");
+            eprintln!("usage: btshctl enable logging|shit|history|auto-suggestion");
             1
         }
     }
 }
 
-fn exec_bshctl_disable(args: &[String], shell: &mut Shell) -> i32 {
+fn exec_btshctl_disable(args: &[String], shell: &mut Shell) -> i32 {
     match args {
         [sub] if sub == "logging" => {
             shell.logging = false;
@@ -2424,13 +2424,13 @@ fn exec_bshctl_disable(args: &[String], shell: &mut Shell) -> i32 {
             0
         }
         _ => {
-            eprintln!("usage: bshctl disable logging|shit|history|auto-suggestion");
+            eprintln!("usage: btshctl disable logging|shit|history|auto-suggestion");
             1
         }
     }
 }
 
-fn exec_bshctl_status(args: &[String], shell: &Shell) -> i32 {
+fn exec_btshctl_status(args: &[String], shell: &Shell) -> i32 {
     match args {
         [sub] if sub == "logging" => {
             let state = if shell.logging { "enabled" } else { "disabled (default)" };
@@ -2454,15 +2454,15 @@ fn exec_bshctl_status(args: &[String], shell: &Shell) -> i32 {
             0
         }
         _ => {
-            eprintln!("usage: bshctl status logging|shit|history|auto-suggestion");
+            eprintln!("usage: btshctl status logging|shit|history|auto-suggestion");
             1
         }
     }
 }
 
-fn exec_bshctl_logging(_args: &[String], shell: &mut Shell) -> i32 {
+fn exec_btshctl_logging(_args: &[String], shell: &mut Shell) -> i32 {
     if unsafe { libc::isatty(libc::STDIN_FILENO) == 0 } {
-        eprintln!("bsh: bshctl: logging: interactive-only command");
+        eprintln!("btsh: btshctl: logging: interactive-only command");
         return 1;
     }
     println!("type q or exit to exit");
@@ -2475,7 +2475,7 @@ fn exec_bshctl_logging(_args: &[String], shell: &mut Shell) -> i32 {
                     continue;
                 }
                 match cmd {
-                    "help" => bshctl_logging_help(),
+                    "help" => btshctl_logging_help(),
                     "enable" => {
                         shell.logging = true;
                         persist_logging_to_config(shell, true);
@@ -2489,7 +2489,7 @@ fn exec_bshctl_logging(_args: &[String], shell: &mut Shell) -> i32 {
                     "status" => {
                         println!("    ! {}", if shell.logging { "on" } else { "off" });
                     }
-                    "clear-file" => bshctl_logging_clear(),
+                    "clear-file" => btshctl_logging_clear(),
                     "q" | "exit" | "quit" => break,
                     other => println!("    ! unknown command: {other}"),
                 }
@@ -2503,7 +2503,7 @@ fn exec_bshctl_logging(_args: &[String], shell: &mut Shell) -> i32 {
     0
 }
 
-fn bshctl_logging_help() {
+fn btshctl_logging_help() {
     println!("    ! logging commands:");
     println!("    !   help         show this help");
     println!("    !   enable       enable logging");
@@ -2513,7 +2513,7 @@ fn bshctl_logging_help() {
     println!("    !   q / exit     leave this shell");
 }
 
-fn bshctl_logging_clear() {
+fn btshctl_logging_clear() {
     print!("    ! delete {DEBUG_LOG}? [y/n] ");
     io::stdout().flush().ok();
     loop {
@@ -2539,9 +2539,9 @@ fn bshctl_logging_clear() {
     }
 }
 
-fn exec_bshctl_shit(_args: &[String], shell: &mut Shell) -> i32 {
+fn exec_btshctl_shit(_args: &[String], shell: &mut Shell) -> i32 {
     if unsafe { libc::isatty(libc::STDIN_FILENO) == 0 } {
-        eprintln!("bsh: bshctl: shit: interactive-only command");
+        eprintln!("btsh: btshctl: shit: interactive-only command");
         return 1;
     }
     println!("type q or exit to exit");
@@ -2554,7 +2554,7 @@ fn exec_bshctl_shit(_args: &[String], shell: &mut Shell) -> i32 {
                     continue;
                 }
                 match cmd {
-                    "help" => bshctl_shit_help(),
+                    "help" => btshctl_shit_help(),
                     "enable" => {
                         shell.shit = true;
                         persist_shit_to_config(shell, true);
@@ -2581,7 +2581,7 @@ fn exec_bshctl_shit(_args: &[String], shell: &mut Shell) -> i32 {
     0
 }
 
-fn bshctl_shit_help() {
+fn btshctl_shit_help() {
     println!("    ! shit commands:");
     println!("    !   help         show this help");
     println!("    !   enable       enable shit");
@@ -2590,9 +2590,9 @@ fn bshctl_shit_help() {
     println!("    !   q / exit     leave this shell");
 }
 
-fn exec_bshctl_history(_args: &[String], shell: &mut Shell) -> i32 {
+fn exec_btshctl_history(_args: &[String], shell: &mut Shell) -> i32 {
     if unsafe { libc::isatty(libc::STDIN_FILENO) == 0 } {
-        eprintln!("bsh: bshctl: history: interactive-only command");
+        eprintln!("btsh: btshctl: history: interactive-only command");
         return 1;
     }
     println!("type q or exit to exit");
@@ -2605,7 +2605,7 @@ fn exec_bshctl_history(_args: &[String], shell: &mut Shell) -> i32 {
                     continue;
                 }
                 match cmd {
-                    "help" => bshctl_history_help(),
+                    "help" => btshctl_history_help(),
                     "enable" => {
                         shell.history = true;
                         persist_history_to_config(shell, true);
@@ -2619,7 +2619,7 @@ fn exec_bshctl_history(_args: &[String], shell: &mut Shell) -> i32 {
                     "status" => {
                         println!("    ! {}", if shell.history { "on" } else { "off" });
                     }
-                    "clear-file" => bshctl_history_clear(),
+                    "clear-file" => btshctl_history_clear(),
                     "q" | "exit" | "quit" => break,
                     other => println!("    ! unknown command: {other}"),
                 }
@@ -2633,7 +2633,7 @@ fn exec_bshctl_history(_args: &[String], shell: &mut Shell) -> i32 {
     0
 }
 
-fn bshctl_history_help() {
+fn btshctl_history_help() {
     println!("    ! history commands:");
     println!("    !   help         show this help");
     println!("    !   enable       enable history");
@@ -2643,7 +2643,7 @@ fn bshctl_history_help() {
     println!("    !   q / exit     leave this shell");
 }
 
-fn bshctl_history_clear() {
+fn btshctl_history_clear() {
     let path = history_file();
     print!("    ! delete {}? [y/n] ", path.display());
     io::stdout().flush().ok();
@@ -2670,9 +2670,9 @@ fn bshctl_history_clear() {
     }
 }
 
-fn exec_bshctl_autosuggest(_args: &[String], shell: &mut Shell) -> i32 {
+fn exec_btshctl_autosuggest(_args: &[String], shell: &mut Shell) -> i32 {
     if unsafe { libc::isatty(libc::STDIN_FILENO) == 0 } {
-        eprintln!("bsh: bshctl: auto-suggestion: interactive-only command");
+        eprintln!("btsh: btshctl: auto-suggestion: interactive-only command");
         return 1;
     }
     println!("type q or exit to exit");
@@ -2685,7 +2685,7 @@ fn exec_bshctl_autosuggest(_args: &[String], shell: &mut Shell) -> i32 {
                     continue;
                 }
                 match cmd {
-                    "help" => bshctl_autosuggest_help(),
+                    "help" => btshctl_autosuggest_help(),
                     "enable" => {
                         shell.autosuggest = true;
                         persist_autosuggest_to_config(shell, true);
@@ -2712,16 +2712,16 @@ fn exec_bshctl_autosuggest(_args: &[String], shell: &mut Shell) -> i32 {
     0
 }
 
-fn exec_bshctl_shell(_args: &[String], shell: &Shell) -> i32 {
+fn exec_btshctl_shell(_args: &[String], shell: &Shell) -> i32 {
     if unsafe { libc::isatty(libc::STDIN_FILENO) == 0 } {
-        eprintln!("bsh: bshctl: --fresh: interactive-only command");
+        eprintln!("btsh: btshctl: --fresh: interactive-only command");
         return 1;
     }
     let flag = "--fresh";
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("bsh: bshctl: {flag}: {e}");
+            eprintln!("btsh: btshctl: {flag}: {e}");
             return 1;
         }
     };
@@ -2738,7 +2738,7 @@ fn exec_bshctl_shell(_args: &[String], shell: &Shell) -> i32 {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("bsh: bshctl: {flag}: {e}");
+            eprintln!("btsh: btshctl: {flag}: {e}");
             restore_shell_terminal(shell);
             return 1;
         }
@@ -2748,7 +2748,7 @@ fn exec_bshctl_shell(_args: &[String], shell: &Shell) -> i32 {
     exit_status_code(status)
 }
 
-fn bshctl_autosuggest_help() {
+fn btshctl_autosuggest_help() {
     println!("    ! auto-suggestion commands:");
     println!("    !   help         show this help");
     println!("    !   enable       enable auto-suggestion");
@@ -2757,7 +2757,7 @@ fn bshctl_autosuggest_help() {
     println!("    !   q / exit     leave this shell");
 }
 
-const DEBUG_LOG: &str = "/tmp/bsh_debug.log";
+const DEBUG_LOG: &str = "/tmp/btsh_debug.log";
 
 fn log_line(line: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(DEBUG_LOG) {
@@ -2803,7 +2803,7 @@ fn exec_line(line: &str, shell: &mut Shell) -> i32 {
     let tokens = match tok.tokenize() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("bsh: parse error: {e}");
+            eprintln!("btsh: parse error: {e}");
             return 2;
         }
     };
@@ -2813,7 +2813,7 @@ fn exec_line(line: &str, shell: &mut Shell) -> i32 {
     let nodes = match parse(&tokens) {
         Ok(n) => n,
         Err(e) => {
-            eprintln!("bsh: {e}");
+            eprintln!("btsh: {e}");
             return 2;
         }
     };
@@ -3002,7 +3002,7 @@ fn exec_external(simple: &Simple, shell: &Shell) -> i32 {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("bsh: {}: {e}", simple.args[0]);
+            eprintln!("btsh: {}: {e}", simple.args[0]);
             restore_shell_terminal(shell);
             return 126;
         }
@@ -3020,13 +3020,13 @@ fn resolve_command(name: &str, shell: &Shell) -> Result<String, i32> {
         if Path::new(cmd_name).is_file() {
             return Ok(cmd_name.to_string());
         }
-        eprintln!("bsh: {}: No such file", cmd_name);
+        eprintln!("btsh: {}: No such file", cmd_name);
         return Err(127);
     }
     match find_in_path(cmd_name) {
         Some(p) => Ok(p.to_string_lossy().to_string()),
         None => {
-            eprintln!("bsh: {}: command not found", cmd_name);
+            eprintln!("btsh: {}: command not found", cmd_name);
             Err(127)
         }
     }
@@ -3039,7 +3039,7 @@ fn apply_redirects(cmd: &mut Command, redirects: &[Redirect], shell: &Shell) {
             RedirectKind::In => {
                 match File::open(&target) {
                     Ok(f) => { cmd.stdin(f); }
-                    Err(e) => { eprintln!("bsh: {target}: {e}"); return; }
+                    Err(e) => { eprintln!("btsh: {target}: {e}"); return; }
                 }
             }
             RedirectKind::Out => {
@@ -3050,7 +3050,7 @@ fn apply_redirects(cmd: &mut Command, redirects: &[Redirect], shell: &Shell) {
                             _ => { cmd.stdout(f); }
                         }
                     }
-                    Err(e) => { eprintln!("bsh: {target}: {e}"); return; }
+                    Err(e) => { eprintln!("btsh: {target}: {e}"); return; }
                 }
             }
             RedirectKind::Append => {
@@ -3061,13 +3061,13 @@ fn apply_redirects(cmd: &mut Command, redirects: &[Redirect], shell: &Shell) {
                             _ => { cmd.stdout(f); }
                         }
                     }
-                    Err(e) => { eprintln!("bsh: {target}: {e}"); return; }
+                    Err(e) => { eprintln!("btsh: {target}: {e}"); return; }
                 }
             }
             RedirectKind::DupOut => {
                 let tfd: i32 = target.parse().unwrap_or(-1);
                 if tfd < 0 {
-                    eprintln!("bsh: {}: invalid file descriptor", target);
+                    eprintln!("btsh: {}: invalid file descriptor", target);
                     return;
                 }
                 let my_fd = redir.fd;
@@ -3081,7 +3081,7 @@ fn apply_redirects(cmd: &mut Command, redirects: &[Redirect], shell: &Shell) {
             RedirectKind::DupIn => {
                 let tfd: i32 = target.parse().unwrap_or(-1);
                 if tfd < 0 {
-                    eprintln!("bsh: {}: invalid file descriptor", target);
+                    eprintln!("btsh: {}: invalid file descriptor", target);
                     return;
                 }
                 let my_fd = redir.fd;
@@ -3121,13 +3121,13 @@ fn exec_redirect_only(simple: &Simple, shell: &Shell) -> i32 {
         match redir.kind {
             RedirectKind::In => {
                 if File::open(&target).is_err() {
-                    eprintln!("bsh: {target}: No such file");
+                    eprintln!("btsh: {target}: No such file");
                     return 1;
                 }
             }
             RedirectKind::Out | RedirectKind::Append => {
                 if File::create(&target).is_err() {
-                    eprintln!("bsh: {target}: cannot create");
+                    eprintln!("btsh: {target}: cannot create");
                     return 1;
                 }
             }
@@ -3204,7 +3204,7 @@ fn exec_pipeline(cmds: &[Simple], shell: &Shell) -> i32 {
         match cmd.spawn() {
             Ok(c) => children.push(c),
             Err(e) => {
-                eprintln!("bsh: {e}");
+                eprintln!("btsh: {e}");
                 for &(rfd, wfd) in &pipes {
                     unsafe { libc::close(rfd); libc::close(wfd); }
                 }
@@ -3270,7 +3270,7 @@ fn exec_pipeline_simple(simple: &Simple, shell: &Shell) -> i32 {
 fn exec_background(simple: &Simple, shell: &mut Shell) -> i32 {
     match unsafe { libc::fork() } {
         -1 => {
-            eprintln!("bsh: fork failed");
+            eprintln!("btsh: fork failed");
             1
         }
         0 => {
@@ -3292,7 +3292,7 @@ fn exec_background(simple: &Simple, shell: &mut Shell) -> i32 {
 fn exec_pipeline_background(cmds: &[Simple], shell: &mut Shell) -> i32 {
     match unsafe { libc::fork() } {
         -1 => {
-            eprintln!("bsh: fork failed");
+            eprintln!("btsh: fork failed");
             1
         }
         0 => {
@@ -3342,9 +3342,9 @@ fn reap_background(shell: &mut Shell) {
 // =============================================================================
 // Config
 // =============================================================================
-// Example config (~/.config/bsh/config):
+// Example config (~/.config/btsh/config):
 // prompt {
-//     echo "Welcome to bsh"
+//     echo "Welcome to btsh"
 //     echo "Current directory: "
 // }
 // if-interactive {
@@ -3378,7 +3378,7 @@ struct Config {
 
 fn load_config() -> Option<Config> {
     let home = env::var("HOME").ok()?;
-    let config_path = Path::new(&home).join(".config").join("bsh").join("config");
+    let config_path = Path::new(&home).join(".config").join("btsh").join("config");
     if !config_path.exists() {
         return None;
     }
@@ -3756,7 +3756,7 @@ fn main() {
     if args.len() >= 3 && args[1] == "-c" {
         setup_signal_handlers();
         let config_path = env::var("HOME").ok()
-            .map(|h| Path::new(&h).join(".config").join("bsh").join("config"));
+            .map(|h| Path::new(&h).join(".config").join("btsh").join("config"));
         let mut shell = Shell {
             last_exit: 0,
             last_bg_pid: None,
@@ -3814,7 +3814,7 @@ fn main() {
     };
 
     let config_path = env::var("HOME").ok()
-        .map(|h| Path::new(&h).join(".config").join("bsh").join("config"));
+        .map(|h| Path::new(&h).join(".config").join("btsh").join("config"));
 
     let mut shell = Shell {
         last_exit: 0,
