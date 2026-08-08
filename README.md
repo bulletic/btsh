@@ -98,12 +98,17 @@ log off
 shit on
 history on
 auto-suggestion on
+prompt-on-failure on
 ```
 
 Prompt escapes: `\w` current directory, `\W` basename, `\u` user, `\h` host,
 `\t` time, `\$`/`\#` privilege, `\n` newline, `\F{color}` ANSI color,
 `\[...]` raw escape. Command history is stored at
 `~/.local/share/btsh/history.txt`.
+
+## Configuration options
+
+`prompt-on-failure on|off` (default: `on`) - When enabled, the prompt turns red if the last command failed (non-zero exit code). Disable to keep the prompt color unchanged regardless of command exit status.
 
 ## License
 

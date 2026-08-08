@@ -317,7 +317,8 @@ impl History {
             }
         }
 
-        History { entries, index: 0, saved: String::new(), path }
+        let index = entries.len();
+        History { entries, index, saved: String::new(), path }
     }
 
     fn add(&mut self, entry: &str) {
@@ -588,6 +589,7 @@ fn input_lines(input_width: usize, term_width: usize) -> usize {
 fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> ReadLineResult {
     let prompt_width = prompt_last_line_width(prompt);
     let last_prompt_line = prompt.lines().next_back().unwrap_or("");
+    let prompt_line_count = prompt.lines().count().max(1);
     let term_width = terminal_width();
     let mut out = Out::new();
 
@@ -606,9 +608,13 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
             cursor = 0;
             prev_lines = 1;
             suggestion = None;
+            if prompt_line_count > 1 {
+                cursor_up(&mut out, prompt_line_count - 1);
+            }
             out.s("\r\x1b[J");
-            out.s(last_prompt_line);
+            out.s(prompt);
             out.flush();
+            continue;
         }
 
         match read_key() {
@@ -2786,7 +2792,7 @@ fn exec_btshctl_logging(_args: &[String], shell: &mut Shell) -> i32 {
                         println!("    ! {}", if shell.logging { "on" } else { "off" });
                     }
                     "clear-file" => btshctl_logging_clear(),
-                    "q" | "exit" | "quit" => break,
+"q" | "exit" | "quit" => break,
                     other => println!("    ! unknown command: {other}"),
                 }
             }
@@ -2798,7 +2804,6 @@ fn exec_btshctl_logging(_args: &[String], shell: &mut Shell) -> i32 {
     }
     0
 }
-
 fn btshctl_logging_help() {
     println!("    ! logging commands:");
     println!("    !   help         show this help");
@@ -2864,7 +2869,7 @@ fn exec_btshctl_shit(_args: &[String], shell: &mut Shell) -> i32 {
                     "status" => {
                         println!("    ! {}", if shell.shit { "on" } else { "off" });
                     }
-                    "q" | "exit" | "quit" => break,
+"q" | "exit" | "quit" => break,
                     other => println!("    ! unknown command: {other}"),
                 }
             }
@@ -2876,7 +2881,6 @@ fn exec_btshctl_shit(_args: &[String], shell: &mut Shell) -> i32 {
     }
     0
 }
-
 fn btshctl_shit_help() {
     println!("    ! shit commands:");
     println!("    !   help         show this help");
@@ -2915,7 +2919,7 @@ fn exec_btshctl_history(_args: &[String], shell: &mut Shell) -> i32 {
                     "status" => {
                         println!("    ! {}", if shell.history { "on" } else { "off" });
                     }
-                    "clear-file" => btshctl_history_clear(),
+"clear-file" => btshctl_history_clear(),
                     "q" | "exit" | "quit" => break,
                     other => println!("    ! unknown command: {other}"),
                 }
@@ -2928,7 +2932,6 @@ fn exec_btshctl_history(_args: &[String], shell: &mut Shell) -> i32 {
     }
     0
 }
-
 fn btshctl_history_help() {
     println!("    ! history commands:");
     println!("    !   help         show this help");
@@ -3670,6 +3673,7 @@ struct Config {
     shit: bool,
     history: bool,
     autosuggest: bool,
+    prompt_on_failure: bool,
 }
 
 fn load_config() -> Option<Config> {
@@ -3690,6 +3694,7 @@ fn load_config() -> Option<Config> {
     let mut shit = true;
     let mut history = true;
     let mut autosuggest = true;
+    let mut prompt_on_failure = true;
 
     let mut i = 0;
     while i < lines.len() {
@@ -3741,11 +3746,13 @@ fn load_config() -> Option<Config> {
             history = val.trim() == "on";
         } else if let Some(val) = line.strip_prefix("auto-suggestion ") {
             autosuggest = val.trim() == "on";
+        } else if let Some(val) = line.strip_prefix("prompt-on-failure ") {
+            prompt_on_failure = val.trim() == "on";
         }
         i += 1;
     }
 
-    Some(Config { prompt_lines, aliases, paths, if_interactive_lines, logging, shit, history, autosuggest })
+    Some(Config { prompt_lines, aliases, paths, if_interactive_lines, logging, shit, history, autosuggest, prompt_on_failure })
 }
 
 fn parse_config_line(line: &str) -> Option<ConfigLine> {
@@ -3829,7 +3836,7 @@ fn render_config_prompt(config: &Config, shell: &Shell) -> String {
             }
         }
     }
-    render_ps1_format(&out, shell)
+    render_ps1_format(&out, shell, Some(config))
 }
 
 fn expand_subshells(input: &str, shell: &Shell) -> String {
@@ -3881,7 +3888,7 @@ fn execute_subshell(cmd: &str, _shell: &Shell) -> String {
 // Prompt
 // =============================================================================
 
-fn render_ps1_format(fmt: &str, shell: &Shell) -> String {
+fn render_ps1_format(fmt: &str, shell: &Shell, config: Option<&Config>) -> String {
     let mut out = String::new();
     let mut chars = fmt.chars();
 
@@ -3980,7 +3987,8 @@ fn render_ps1_format(fmt: &str, shell: &Shell) -> String {
         }
     }
 
-    if shell.last_exit != 0 {
+    let prompt_on_failure = config.map(|c| c.prompt_on_failure).unwrap_or(true);
+    if prompt_on_failure && shell.last_exit != 0 {
         format!("\x1b[31m{}\x1b[0m", out)
     } else {
         out
@@ -3989,7 +3997,7 @@ fn render_ps1_format(fmt: &str, shell: &Shell) -> String {
 
 fn render_prompt(shell: &Shell) -> String {
     let fmt = env::var("PS1").unwrap_or_else(|_| "\\u@\\h \\$ ".into());
-    render_ps1_format(&fmt, shell)
+    render_ps1_format(&fmt, shell, None)
 }
 
 fn gethostname() -> String {
@@ -4179,6 +4187,7 @@ fn main() {
             match read_line_interactive(&prompt, &mut history, shell.autosuggest) {
                 ReadLineResult::Line(l) => l,
                 ReadLineResult::CtrlC => {
+                    // This shouldn't be reached since we handle Ctrl+C inside read_line_interactive
                     shell.last_exit = 130;
                     continue;
                 }
