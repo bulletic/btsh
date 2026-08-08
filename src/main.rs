@@ -69,20 +69,30 @@ struct Shell {
 // =============================================================================
 
 static SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
+static SIGWINCH_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn sigint_handler(_sig: i32) {
     SIGINT_RECEIVED.store(true, Ordering::SeqCst);
+}
+
+extern "C" fn sigwinch_handler(_sig: i32) {
+    SIGWINCH_RECEIVED.store(true, Ordering::SeqCst);
 }
 
 fn setup_signal_handlers() {
     unsafe {
         libc::signal(libc::SIGINT, sigint_handler as *const () as usize);
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+        libc::signal(libc::SIGWINCH, sigwinch_handler as *const () as usize);
     }
 }
 
 fn sigint_pending() -> bool {
     SIGINT_RECEIVED.swap(false, Ordering::SeqCst)
+}
+
+fn winch_pending() -> bool {
+    SIGWINCH_RECEIVED.swap(false, Ordering::SeqCst)
 }
 
 // =============================================================================
@@ -578,19 +588,11 @@ fn terminal_width() -> usize {
     }
 }
 
-fn input_lines(input_width: usize, term_width: usize) -> usize {
-    if input_width == 0 || term_width == 0 {
-        1
-    } else {
-        (input_width + term_width - 1) / term_width
-    }
-}
-
 fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> ReadLineResult {
     let prompt_width = prompt_last_line_width(prompt);
     let last_prompt_line = prompt.lines().next_back().unwrap_or("");
     let prompt_line_count = prompt.lines().count().max(1);
-    let term_width = terminal_width();
+    let mut term_width = terminal_width();
     let mut out = Out::new();
 
     out.s("\r");
@@ -613,6 +615,13 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
             }
             out.s("\r\x1b[J");
             out.s(prompt);
+            out.flush();
+            continue;
+        }
+
+        if winch_pending() {
+            term_width = terminal_width();
+            prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
             out.flush();
             continue;
         }
@@ -774,21 +783,42 @@ fn write_int(out: &mut Out, n: usize) {
     out.s(std::str::from_utf8(&buf[i..]).unwrap());
 }
 
-fn cursor_to(out: &mut Out, pos: usize) {
-    if pos > 0 {
-        out.s("\r\x1b[");
-        write_int(out, pos);
-        out.c('C');
-    } else {
-        out.c('\r');
-    }
-}
-
 fn cursor_up(out: &mut Out, n: usize) {
     if n > 0 {
         out.s("\x1b[");
         write_int(out, n);
         out.c('A');
+    }
+}
+
+// Row/column of the cursor after `w` cells of content have been printed to a
+// terminal `term_width` cells wide, using the same 0-indexed row numbering as
+// a real terminal's auto-wrap behavior: printing exactly `term_width` cells
+// leaves the cursor in a "pending wrap" state still on that same row, not yet
+// wrapped down to the next one.
+fn char_row(w: usize, term_width: usize) -> usize {
+    if term_width == 0 || w == 0 { 0 } else { (w - 1) / term_width }
+}
+
+fn char_col(w: usize, term_width: usize) -> usize {
+    if term_width == 0 || w == 0 { 0 } else { w - char_row(w, term_width) * term_width }
+}
+
+// Move the cursor from `from_row` (where it sits after printing, always the
+// bottom row of the redrawn block) to (target_row, target_col), addressing
+// rows explicitly instead of assuming the target is on the same row as the
+// cursor -- CSI cursor-forward cannot cross row boundaries, so reaching an
+// earlier wrapped row requires cursor_up first.
+fn move_cursor(out: &mut Out, from_row: usize, target_row: usize, target_col: usize) {
+    if target_row < from_row {
+        cursor_up(out, from_row - target_row);
+    }
+    if target_col > 0 {
+        out.s("\r\x1b[");
+        write_int(out, target_col);
+        out.c('C');
+    } else {
+        out.c('\r');
     }
 }
 
@@ -805,9 +835,14 @@ fn refresh_line(out: &mut Out, prompt_width: usize, last_line: &str, line: &str,
     }
     let line_width = UnicodeWidthStr::width(line);
     let total_width = line_width + sug.map(|s| UnicodeWidthStr::width(s)).unwrap_or(0);
-    let cursor_col = UnicodeWidthStr::width(&line[..cursor]);
-    let new_lines = input_lines(prompt_width + total_width, term_width).max(1);
-    cursor_to(out, prompt_width + cursor_col);
+    let cursor_col_offset = UnicodeWidthStr::width(&line[..cursor]);
+    let w_end = prompt_width + total_width;
+    let target_w = prompt_width + cursor_col_offset;
+    let from_row = char_row(w_end, term_width);
+    let target_row = char_row(target_w, term_width);
+    let target_col = char_col(target_w, term_width);
+    let new_lines = from_row + 1;
+    move_cursor(out, from_row, target_row, target_col);
     new_lines
 }
 
@@ -1773,7 +1808,7 @@ fn is_builtin(cmd: &str, shell: &Shell) -> bool {
     if cmd == "shit" && !shell.shit {
         return false;
     }
-    matches!(cmd, "exit" | "cd" | "pwd" | "echo" | "type" | "export" | "true" | "false" | "rm" | "source" | "." | "alias" | "unalias" | "add_path" | "path" | "shit" | "btshctl")
+    matches!(cmd, "exit" | "cd" | "pwd" | "echo" | "type" | "export" | "true" | "false" | "rm" | "source" | "." | "alias" | "unalias" | "add_path" | "path" | "shit" | "btshctl" | "timeout")
 }
 
 fn exec_builtin(simple: &Simple, shell: &mut Shell) -> i32 {
@@ -1835,6 +1870,7 @@ fn exec_builtin(simple: &Simple, shell: &mut Shell) -> i32 {
             0
         }
         "source" | "." => exec_builtin_source(simple, shell),
+        "timeout" => exec_builtin_timeout(simple, shell),
         "shit" => exec_builtin_shit(simple, shell),
         "btshctl" => exec_builtin_btshctl(simple, shell),
         "rm" => exec_builtin_rm(simple, shell),
@@ -2218,6 +2254,108 @@ fn exec_builtin_source(simple: &Simple, shell: &mut Shell) -> i32 {
         last_code = code;
     }
     last_code
+}
+
+fn parse_duration(s: &str) -> Option<f64> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut chars = s.chars();
+    let last = chars.next_back()?;
+    let (num_part, mult) = if last.is_ascii_alphabetic() {
+        let mult = match last {
+            's' => 1.0,
+            'm' => 60.0,
+            'h' => 3600.0,
+            'd' => 86400.0,
+            _ => return None,
+        };
+        (&s[..s.len() - 1], mult)
+    } else {
+        (s, 1.0)
+    };
+    let base: f64 = num_part.parse().ok()?;
+    Some(base * mult)
+}
+
+fn exec_builtin_timeout(simple: &Simple, shell: &mut Shell) -> i32 {
+    if simple.args.len() < 3 {
+        eprintln!("btsh: timeout: usage: timeout DURATION COMMAND [ARGS...]");
+        return 2;
+    }
+    let dur = match parse_duration(&simple.args[1]) {
+        Some(d) if d > 0.0 => d,
+        _ => {
+            eprintln!("btsh: timeout: invalid duration: {}", simple.args[1]);
+            return 2;
+        }
+    };
+    let cmd_name = &simple.args[2];
+    let program = match resolve_command(cmd_name, shell) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+
+    let mut cmd = Command::new(&program);
+    cmd.args(&simple.args[3..]);
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+
+    prepare_job_terminal(shell);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("btsh: timeout: {}: {e}", cmd_name);
+            restore_shell_terminal(shell);
+            return 126;
+        }
+    };
+
+    let pid = child.id() as i32;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(dur);
+    let code;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                code = exit_status_code(status);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    // Ask nicely first, then insist.
+                    unsafe { libc::kill(pid, libc::SIGTERM); }
+                    let grace = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(_)) => { code = 124; break; }
+                            Ok(None) => {
+                                if std::time::Instant::now() >= grace {
+                                    unsafe { libc::kill(pid, libc::SIGKILL); }
+                                    child.wait().ok();
+                                    code = 124;
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(20));
+                            }
+                            Err(_) => { code = 124; break; }
+                        }
+                    }
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => { code = 1; break; }
+        }
+    }
+
+    restore_shell_terminal(shell);
+    code
 }
 
 fn exec_builtin_with_redirects(simple: &Simple, shell: &mut Shell) -> i32 {
@@ -3673,7 +3811,6 @@ struct Config {
     shit: bool,
     history: bool,
     autosuggest: bool,
-    prompt_on_failure: bool,
 }
 
 fn load_config() -> Option<Config> {
@@ -3694,7 +3831,6 @@ fn load_config() -> Option<Config> {
     let mut shit = true;
     let mut history = true;
     let mut autosuggest = true;
-    let mut prompt_on_failure = true;
 
     let mut i = 0;
     while i < lines.len() {
@@ -3746,13 +3882,11 @@ fn load_config() -> Option<Config> {
             history = val.trim() == "on";
         } else if let Some(val) = line.strip_prefix("auto-suggestion ") {
             autosuggest = val.trim() == "on";
-        } else if let Some(val) = line.strip_prefix("prompt-on-failure ") {
-            prompt_on_failure = val.trim() == "on";
         }
         i += 1;
     }
 
-    Some(Config { prompt_lines, aliases, paths, if_interactive_lines, logging, shit, history, autosuggest, prompt_on_failure })
+    Some(Config { prompt_lines, aliases, paths, if_interactive_lines, logging, shit, history, autosuggest })
 }
 
 fn parse_config_line(line: &str) -> Option<ConfigLine> {
@@ -3888,7 +4022,7 @@ fn execute_subshell(cmd: &str, _shell: &Shell) -> String {
 // Prompt
 // =============================================================================
 
-fn render_ps1_format(fmt: &str, shell: &Shell, config: Option<&Config>) -> String {
+fn render_ps1_format(fmt: &str, _shell: &Shell, _config: Option<&Config>) -> String {
     let mut out = String::new();
     let mut chars = fmt.chars();
 
@@ -3987,12 +4121,7 @@ fn render_ps1_format(fmt: &str, shell: &Shell, config: Option<&Config>) -> Strin
         }
     }
 
-    let prompt_on_failure = config.map(|c| c.prompt_on_failure).unwrap_or(true);
-    if prompt_on_failure && shell.last_exit != 0 {
-        format!("\x1b[31m{}\x1b[0m", out)
-    } else {
-        out
-    }
+    out
 }
 
 fn render_prompt(shell: &Shell) -> String {
