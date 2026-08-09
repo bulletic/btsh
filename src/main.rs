@@ -588,6 +588,47 @@ fn terminal_width() -> usize {
     }
 }
 
+// Ask the terminal where the cursor actually is (DSR/CPR: ESC[6n -> terminal
+// replies ESC[row;colR) instead of trusting our own bookkeeping. This gives a
+// verified anchor row to redraw from, so a single wrong assumption can't
+// compound across keystrokes the way pure relative cursor_up counting can.
+// Returns None if the terminal doesn't answer within the timeout -- callers
+// fall back to the old relative-tracking behavior in that case.
+fn query_cursor_row() -> Option<usize> {
+    unsafe {
+        libc::write(libc::STDOUT_FILENO, b"\x1b[6n".as_ptr() as *const libc::c_void, 4);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    let mut buf = Vec::with_capacity(16);
+    loop {
+        let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
+        let mut pfd = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
+        let ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let ret = unsafe { libc::poll(&mut pfd, 1, ms) };
+        if ret <= 0 {
+            return None;
+        }
+        let mut b = [0u8; 1];
+        let n = unsafe { libc::read(libc::STDIN_FILENO, b.as_mut_ptr() as *mut libc::c_void, 1) };
+        if n != 1 {
+            return None;
+        }
+        buf.push(b[0]);
+        if b[0] == b'R' {
+            break;
+        }
+        if buf.len() > 32 {
+            return None;
+        }
+    }
+    let s = std::str::from_utf8(&buf).ok()?;
+    let start = s.rfind("\x1b[")?;
+    let body = &s[start + 2..s.len() - 1];
+    let row_str = body.split(';').next()?;
+    let row: usize = row_str.parse().ok()?;
+    Some(row.saturating_sub(1))
+}
+
 fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> ReadLineResult {
     let prompt_width = prompt_last_line_width(prompt);
     let last_prompt_line = prompt.lines().next_back().unwrap_or("");
@@ -598,6 +639,11 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
     out.s("\r");
     out.s(prompt);
     out.flush();
+
+    // Verified anchor row for this edit session, from the terminal's own
+    // cursor-position report. None means the terminal didn't answer (no CPR
+    // support) -- redraws fall back to relative cursor_up tracking.
+    let mut origin_row = query_cursor_row();
 
     let mut line = String::new();
     let mut cursor = 0;
@@ -610,18 +656,28 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
             cursor = 0;
             prev_lines = 1;
             suggestion = None;
-            if prompt_line_count > 1 {
-                cursor_up(&mut out, prompt_line_count - 1);
+            match origin_row {
+                Some(row) => {
+                    out.s("\x1b[");
+                    write_int(&mut out, row + 1);
+                    out.s(";1H\x1b[J");
+                    out.s(last_prompt_line);
+                }
+                None => {
+                    if prompt_line_count > 1 {
+                        cursor_up(&mut out, prompt_line_count - 1);
+                    }
+                    out.s("\r\x1b[J");
+                    out.s(prompt);
+                }
             }
-            out.s("\r\x1b[J");
-            out.s(prompt);
             out.flush();
             continue;
         }
 
         if winch_pending() {
             term_width = terminal_width();
-            prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+            prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
             out.flush();
             continue;
         }
@@ -640,7 +696,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
             Some(Key::Char(c)) => {
                 if matches!(c, '"' | '\'' | ')' | ']' | '}') && line[cursor..].chars().next() == Some(c) {
                     cursor += c.len_utf8();
-                    prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                     out.flush();
                     continue;
                 }
@@ -657,7 +713,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                     line.insert(cursor, cl);
                 }
                 suggestion = suggest_command_opt(&line, &history, suggest);
-                prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                 out.flush();
             }
             Some(Key::Backspace) => {
@@ -666,7 +722,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                     cursor -= prev.len_utf8();
                     line.remove(cursor);
                     suggestion = suggest_command_opt(&line, &history, suggest);
-                    prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                     out.flush();
                 }
             }
@@ -674,7 +730,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                 if cursor < line.len() {
                     line.remove(cursor);
                     suggestion = suggest_command_opt(&line, &history, suggest);
-                    prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                     out.flush();
                 }
             }
@@ -682,7 +738,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                 if cursor > 0 {
                     let prev = line[..cursor].chars().next_back().unwrap();
                     cursor -= prev.len_utf8();
-                    prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                     out.flush();
                 }
             }
@@ -690,7 +746,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                 if cursor < line.len() {
                     let next = line[cursor..].chars().next().unwrap();
                     cursor += next.len_utf8();
-                    prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                     out.flush();
                 } else if let Some(sug) = &suggestion {
                     if !sug.is_empty() {
@@ -698,19 +754,19 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                         line.push(c);
                         cursor = line.len();
                         suggestion = suggest_command_opt(&line, &history, suggest);
-                        prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                        prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                         out.flush();
                     }
                 }
             }
             Some(Key::Home) => {
                 cursor = 0;
-                prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                 out.flush();
             }
             Some(Key::End) => {
                 cursor = line.len();
-                prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                 out.flush();
             }
             Some(Key::Up) => {
@@ -718,7 +774,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                     line = hist_line;
                     cursor = line.len();
                     suggestion = suggest_command_opt(&line, &history, suggest);
-                    prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                     out.flush();
                 }
             }
@@ -727,7 +783,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                     line = hist_line;
                     cursor = line.len();
                     suggestion = suggest_command_opt(&line, &history, suggest);
-                    prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                     out.flush();
                 }
             }
@@ -745,7 +801,8 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
             Some(Key::CtrlL) => {
                 out.s("\x1b[2J\x1b[H");
                 out.s(prompt);
-                prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                origin_row = Some(prompt_line_count.saturating_sub(1));
+                prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                 out.flush();
             }
             Some(Key::Tab) => {
@@ -754,7 +811,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                         line.push_str(sug);
                         cursor = line.len();
                         suggestion = suggest_command_opt(&line, &history, suggest);
-                        prev_lines = refresh_line(&mut out, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                        prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                         out.flush();
                     }
                 }
@@ -822,9 +879,19 @@ fn move_cursor(out: &mut Out, from_row: usize, target_row: usize, target_col: us
     }
 }
 
-fn refresh_line(out: &mut Out, prompt_width: usize, last_line: &str, line: &str, cursor: usize, prev_lines: usize, term_width: usize, suggestion: Option<&str>) -> usize {
-    cursor_up(out, prev_lines - 1);
-    out.s("\r\x1b[J");
+fn refresh_line(out: &mut Out, origin_row: Option<usize>, prompt_width: usize, last_line: &str, line: &str, cursor: usize, prev_lines: usize, term_width: usize, suggestion: Option<&str>) -> usize {
+    match origin_row {
+        Some(row) => {
+            out.s("\x1b[");
+            write_int(out, row + 1);
+            out.s(";1H");
+        }
+        None => {
+            cursor_up(out, prev_lines - 1);
+            out.c('\r');
+        }
+    }
+    out.s("\x1b[J");
     out.s(last_line);
     out.s(line);
     let sug = suggestion.filter(|_| cursor == line.len());
@@ -842,7 +909,18 @@ fn refresh_line(out: &mut Out, prompt_width: usize, last_line: &str, line: &str,
     let target_row = char_row(target_w, term_width);
     let target_col = char_col(target_w, term_width);
     let new_lines = from_row + 1;
-    move_cursor(out, from_row, target_row, target_col);
+    match origin_row {
+        Some(row) => {
+            out.s("\x1b[");
+            write_int(out, row + target_row + 1);
+            out.s(";");
+            write_int(out, target_col + 1);
+            out.c('H');
+        }
+        None => {
+            move_cursor(out, from_row, target_row, target_col);
+        }
+    }
     new_lines
 }
 
