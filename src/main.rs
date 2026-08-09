@@ -114,6 +114,11 @@ enum Key {
     CtrlC,
     CtrlD,
     CtrlL,
+    // Terminal's reply to a cursor-position query (DSR/CPR), carrying the
+    // reported row. Recognized here, in the same parser as every other key,
+    // so it can never be mistaken for literal typed input no matter when it
+    // arrives in the stream -- see read_line_interactive.
+    CursorReport(usize),
     Unknown,
 }
 
@@ -214,17 +219,37 @@ fn read_key() -> Option<Key> {
                     0x44 => Key::Left,
                     0x48 => Key::Home,
                     0x46 => Key::End,
-                    0x33 => {
-                        let b4 = read_byte().unwrap_or(0);
-                        if b4 == 0x7e { Key::Delete } else { Key::Unknown }
-                    }
-                    0x31 => {
-                        let b4 = read_byte().unwrap_or(0);
-                        if b4 == 0x7e { Key::Home } else { Key::Unknown }
-                    }
-                    0x34 => {
-                        let b4 = read_byte().unwrap_or(0);
-                        if b4 == 0x7e { Key::End } else { Key::Unknown }
+                    b if b.is_ascii_digit() => {
+                        // General CSI parameter sequence: one or more
+                        // ';'-separated digit groups, terminated by a final
+                        // byte. Covers both the old single-number forms
+                        // (3~ delete, 1~/7~ home, 4~/8~ end) and a cursor
+                        // position report (row;colR) -- CPR must be
+                        // positively recognized here, not left to fall
+                        // through byte-by-byte into literal Key::Char.
+                        let mut groups: Vec<String> = vec![(b as char).to_string()];
+                        let terminator;
+                        loop {
+                            let nb = read_byte().unwrap_or(b'~');
+                            if nb == b';' {
+                                groups.push(String::new());
+                            } else if nb.is_ascii_digit() {
+                                groups.last_mut().unwrap().push(nb as char);
+                            } else {
+                                terminator = nb;
+                                break;
+                            }
+                        }
+                        match terminator {
+                            b'~' => match groups[0].as_str() {
+                                "3" => Key::Delete,
+                                "1" | "7" => Key::Home,
+                                "4" | "8" => Key::End,
+                                _ => Key::Unknown,
+                            },
+                            b'R' => groups[0].parse::<usize>().map(Key::CursorReport).unwrap_or(Key::Unknown),
+                            _ => Key::Unknown,
+                        }
                     }
                     _ => Key::Unknown,
                 }
@@ -588,47 +613,6 @@ fn terminal_width() -> usize {
     }
 }
 
-// Ask the terminal where the cursor actually is (DSR/CPR: ESC[6n -> terminal
-// replies ESC[row;colR) instead of trusting our own bookkeeping. This gives a
-// verified anchor row to redraw from, so a single wrong assumption can't
-// compound across keystrokes the way pure relative cursor_up counting can.
-// Returns None if the terminal doesn't answer within the timeout -- callers
-// fall back to the old relative-tracking behavior in that case.
-fn query_cursor_row() -> Option<usize> {
-    unsafe {
-        libc::write(libc::STDOUT_FILENO, b"\x1b[6n".as_ptr() as *const libc::c_void, 4);
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
-    let mut buf = Vec::with_capacity(16);
-    loop {
-        let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
-        let mut pfd = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
-        let ms = remaining.as_millis().min(i32::MAX as u128) as i32;
-        let ret = unsafe { libc::poll(&mut pfd, 1, ms) };
-        if ret <= 0 {
-            return None;
-        }
-        let mut b = [0u8; 1];
-        let n = unsafe { libc::read(libc::STDIN_FILENO, b.as_mut_ptr() as *mut libc::c_void, 1) };
-        if n != 1 {
-            return None;
-        }
-        buf.push(b[0]);
-        if b[0] == b'R' {
-            break;
-        }
-        if buf.len() > 32 {
-            return None;
-        }
-    }
-    let s = std::str::from_utf8(&buf).ok()?;
-    let start = s.rfind("\x1b[")?;
-    let body = &s[start + 2..s.len() - 1];
-    let row_str = body.split(';').next()?;
-    let row: usize = row_str.parse().ok()?;
-    Some(row.saturating_sub(1))
-}
-
 fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> ReadLineResult {
     let prompt_width = prompt_last_line_width(prompt);
     let last_prompt_line = prompt.lines().next_back().unwrap_or("");
@@ -638,12 +622,19 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
 
     out.s("\r");
     out.s(prompt);
+    // Ask the terminal for its cursor position (DSR/CPR). We don't wait for
+    // the reply -- it's recognized as Key::CursorReport whenever it arrives,
+    // through the same parser as every other keystroke, so a slow reply
+    // (e.g. a freshly spawned terminal window) can never be misread as
+    // literal typed characters.
+    out.s("\x1b[6n");
     out.flush();
 
-    // Verified anchor row for this edit session, from the terminal's own
-    // cursor-position report. None means the terminal didn't answer (no CPR
-    // support) -- redraws fall back to relative cursor_up tracking.
-    let mut origin_row = query_cursor_row();
+    // Verified anchor row for this edit session, set once the terminal's
+    // cursor-position report arrives. None until then (and permanently, if
+    // the terminal never answers) -- redraws fall back to relative
+    // cursor_up tracking in that case.
+    let mut origin_row: Option<usize> = None;
 
     let mut line = String::new();
     let mut cursor = 0;
@@ -815,6 +806,9 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                         out.flush();
                     }
                 }
+            }
+            Some(Key::CursorReport(row)) => {
+                origin_row = Some(row.saturating_sub(1));
             }
             Some(Key::Unknown) => {}
         }
