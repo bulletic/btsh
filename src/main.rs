@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{self, Command, Stdio, Child};
+use std::process::{self, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use glob::glob;
@@ -3646,6 +3646,25 @@ fn exec_redirect_only(simple: &Simple, shell: &Shell) -> i32 {
     0
 }
 
+fn clone_shell(shell: &Shell) -> Shell {
+    Shell {
+        last_exit: shell.last_exit,
+        last_bg_pid: shell.last_bg_pid,
+        running_bg: shell.running_bg.clone(),
+        vars: shell.vars.clone(),
+        aliases: shell.aliases.clone(),
+        config_path: shell.config_path.clone(),
+        last_cmd: shell.last_cmd.clone(),
+        prev_cmd: shell.prev_cmd.clone(),
+        background_job: shell.background_job,
+        logging: shell.logging,
+        shit: shell.shit,
+        history: shell.history,
+        autosuggest: shell.autosuggest,
+        fresh: shell.fresh,
+    }
+}
+
 fn exec_pipeline(cmds: &[Simple], shell: &Shell) -> i32 {
     if cmds.is_empty() {
         return 0;
@@ -3661,16 +3680,68 @@ fn exec_pipeline(cmds: &[Simple], shell: &Shell) -> i32 {
         let mut fds: [i32; 2] = [0, 0];
         unsafe {
             libc::pipe(fds.as_mut_ptr());
+            // Close-on-exec: without this, a spawned stage silently inherits
+            // extra copies of pipe fds it never asked for (raw pipe() fds
+            // aren't CLOEXEC by default). A leftover write-end copy in a
+            // reader stage means the pipe never reaches EOF from that
+            // process's own point of view, hanging its read forever even
+            // after every real writer has closed. The one fd each stage
+            // actually needs gets explicitly dup2'd onto 0/1 before exec,
+            // which produces a fresh non-CLOEXEC descriptor that survives;
+            // everything else here gets closed automatically at exec time.
+            libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
         }
         pipes.push((fds[0], fds[1]));
     }
 
-    let mut children: Vec<Child> = Vec::new();
+    let mut pids: Vec<i32> = Vec::new();
 
     prepare_job_terminal(shell);
 
-    for (i, simple) in cmds.iter().enumerate() {
-        let program = match resolve_command(&simple.args[0], shell) {
+    for (i, raw_simple) in cmds.iter().enumerate() {
+        let simple = expand_aliases(raw_simple, shell);
+        let cmd_name = &simple.args[0];
+
+        if is_builtin(cmd_name, shell) {
+            // Builtins have no external binary to exec, so give this stage
+            // its own forked process, same as every other pipeline stage,
+            // and run the builtin in-process there. This also gives it
+            // authentic pipeline semantics: a builtin mutating shell state
+            // (e.g. cd) only affects that forked copy, same as bash.
+            match unsafe { libc::fork() } {
+                -1 => {
+                    eprintln!("btsh: fork failed");
+                    for &(rfd, wfd) in &pipes { unsafe { libc::close(rfd); libc::close(wfd); } }
+                    restore_shell_terminal(shell);
+                    return 1;
+                }
+                0 => {
+                    unsafe { libc::signal(libc::SIGINT, libc::SIG_DFL); }
+                    if i == 0 {
+                        unsafe { libc::dup2(pipes[0].1, 1); }
+                    } else if i == n - 1 {
+                        unsafe { libc::dup2(pipes[i - 1].0, 0); }
+                    } else {
+                        unsafe { libc::dup2(pipes[i - 1].0, 0); libc::dup2(pipes[i].1, 1); }
+                    }
+                    for &(rfd, wfd) in &pipes {
+                        unsafe { libc::close(rfd); libc::close(wfd); }
+                    }
+                    let mut shell_copy = clone_shell(shell);
+                    let code = exec_builtin_with_redirects(&simple, &mut shell_copy);
+                    io::stdout().flush().ok();
+                    io::stderr().flush().ok();
+                    process::exit(code);
+                }
+                pid => {
+                    pids.push(pid);
+                    continue;
+                }
+            }
+        }
+
+        let program = match resolve_command(cmd_name, shell) {
             Ok(p) => p,
             Err(_code) => {
                 for &(rfd, wfd) in &pipes {
@@ -3682,7 +3753,7 @@ fn exec_pipeline(cmds: &[Simple], shell: &Shell) -> i32 {
         };
 
         let mut cmd = Command::new(&program);
-        let expanded = expand_simple(simple, shell);
+        let expanded = expand_simple(&simple, shell);
         if !expanded.args.is_empty() {
             cmd.args(&expanded.args[1..]);
         }
@@ -3711,7 +3782,7 @@ fn exec_pipeline(cmds: &[Simple], shell: &Shell) -> i32 {
         apply_redirects(&mut cmd, &simple.redirects, shell);
 
         match cmd.spawn() {
-            Ok(c) => children.push(c),
+            Ok(c) => pids.push(c.id() as i32),
             Err(e) => {
                 eprintln!("btsh: {e}");
                 for &(rfd, wfd) in &pipes {
@@ -3730,10 +3801,13 @@ fn exec_pipeline(cmds: &[Simple], shell: &Shell) -> i32 {
     drop(pipes);
 
     let mut last_code = 0;
-    for mut child in children {
-        if let Ok(status) = child.wait() {
-            last_code = exit_status_code(status);
+    for pid in pids {
+        let mut raw_status: i32 = 0;
+        unsafe {
+            libc::waitpid(pid, &mut raw_status as *mut i32, 0);
         }
+        use std::os::unix::process::ExitStatusExt;
+        last_code = exit_status_code(process::ExitStatus::from_raw(raw_status));
     }
     restore_shell_terminal(shell);
     last_code
@@ -3748,22 +3822,7 @@ fn exec_pipeline_simple(simple: &Simple, shell: &Shell) -> i32 {
 
     let cmd_name = &simple.args[0];
     if is_builtin(cmd_name, shell) {
-        let mut shell_copy = Shell {
-            last_exit: shell.last_exit,
-            last_bg_pid: shell.last_bg_pid,
-            running_bg: shell.running_bg.clone(),
-            vars: shell.vars.clone(),
-            aliases: shell.aliases.clone(),
-            config_path: shell.config_path.clone(),
-            last_cmd: shell.last_cmd.clone(),
-            prev_cmd: shell.prev_cmd.clone(),
-            background_job: shell.background_job,
-            logging: shell.logging,
-            shit: shell.shit,
-            history: shell.history,
-            autosuggest: shell.autosuggest,
-            fresh: shell.fresh,
-        };
+        let mut shell_copy = clone_shell(shell);
         let mut expanded = Simple {
             args: Vec::new(),
             redirects: simple.redirects.clone(),
