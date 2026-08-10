@@ -166,6 +166,50 @@ fn set_raw_mode() {
     }
 }
 
+struct TermCaps {
+    clear_screen: String,
+    erase_to_end: String,
+    dim: String,
+    reset: String,
+}
+
+// Ask the terminal database (via `tput`, standard on any Unix system with
+// ncurses -- macOS and Linux both ship it) what THIS terminal's actual
+// escape sequences are for these operations, resolved once on first use and
+// cached for the rest of the session, instead of assuming every terminal
+// matches the common xterm convention. Falls back to that xterm-style
+// convention if `tput` or the terminfo entry for $TERM isn't available --
+// these particular fallbacks are universal enough in practice to be a safe
+// default, not a guess. Absolute cursor positioning (CUP) and relative
+// cursor-up are deliberately left as hardcoded ANSI rather than resolved
+// here: they're part of the core ECMA-48 standard, supported identically by
+// every terminal exercised tonight (including foot), and a real terminfo
+// resolution for parameterized capabilities would need either a dependency
+// whose exact API isn't verified here or a hand-rolled parameter-string
+// interpreter -- more unverified risk than the marginal benefit justifies.
+fn resolve_term_caps() -> TermCaps {
+    let tput = |args: &[&str]| -> Option<String> {
+        let out = Command::new("tput").args(args).output().ok()?;
+        if out.status.success() && !out.stdout.is_empty() {
+            String::from_utf8(out.stdout).ok()
+        } else {
+            None
+        }
+    };
+    TermCaps {
+        clear_screen: tput(&["clear"]).unwrap_or_else(|| "\x1b[2J\x1b[H".to_string()),
+        erase_to_end: tput(&["ed"]).unwrap_or_else(|| "\x1b[J".to_string()),
+        dim: tput(&["dim"]).unwrap_or_else(|| "\x1b[2m".to_string()),
+        reset: tput(&["sgr0"]).unwrap_or_else(|| "\x1b[0m".to_string()),
+    }
+}
+
+static TERM_CAPS: std::sync::OnceLock<TermCaps> = std::sync::OnceLock::new();
+
+fn term_caps() -> &'static TermCaps {
+    TERM_CAPS.get_or_init(resolve_term_caps)
+}
+
 fn prepare_job_terminal(shell: &Shell) {
     if !shell.background_job {
         set_cooked_mode();
@@ -651,14 +695,16 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                 Some(row) => {
                     out.s("\x1b[");
                     write_int(&mut out, row + 1);
-                    out.s(";1H\x1b[J");
+                    out.s(";1H");
+                    out.s(&term_caps().erase_to_end);
                     out.s(last_prompt_line);
                 }
                 None => {
                     if prompt_line_count > 1 {
                         cursor_up(&mut out, prompt_line_count - 1);
                     }
-                    out.s("\r\x1b[J");
+                    out.c('\r');
+                    out.s(&term_caps().erase_to_end);
                     out.s(prompt);
                 }
             }
@@ -679,7 +725,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
             }
             Some(Key::Enter) => {
                 out.s(&line[cursor..]);
-                out.s("\x1b[J");
+                out.s(&term_caps().erase_to_end);
                 out.s("\r\n");
                 out.flush();
                 break ReadLineResult::Line(line);
@@ -790,7 +836,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                 }
             }
             Some(Key::CtrlL) => {
-                out.s("\x1b[2J\x1b[H");
+                out.s(&term_caps().clear_screen);
                 out.s(prompt);
                 origin_row = Some(prompt_line_count.saturating_sub(1));
                 prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
@@ -885,14 +931,14 @@ fn refresh_line(out: &mut Out, origin_row: Option<usize>, prompt_width: usize, l
             out.c('\r');
         }
     }
-    out.s("\x1b[J");
+    out.s(&term_caps().erase_to_end);
     out.s(last_line);
     out.s(line);
     let sug = suggestion.filter(|_| cursor == line.len());
     if let Some(s) = sug {
-        out.s("\x1b[2m");
+        out.s(&term_caps().dim);
         out.s(s);
-        out.s("\x1b[22m");
+        out.s(&term_caps().reset);
     }
     let line_width = UnicodeWidthStr::width(line);
     let total_width = line_width + sug.map(|s| UnicodeWidthStr::width(s)).unwrap_or(0);
@@ -1151,6 +1197,42 @@ impl<'a> Tokenizer<'a> {
             }
         }
     }
+}
+
+// Expand aliases at the token level, before parsing, so operators stored
+// inside an alias value (&&, |, ;, etc.) become real tokens the parser can
+// build a proper And/Or/Pipeline tree from -- instead of ending up as
+// literal argument words on whatever command happened to be first. Only
+// words in "command position" (the very start, or right after ; && || | &)
+// are alias-eligible, matching where a command name can appear.
+fn expand_alias_tokens(tokens: Vec<Token>, shell: &Shell) -> Vec<Token> {
+    let mut result = Vec::with_capacity(tokens.len());
+    let mut pending: Vec<Token> = tokens.into_iter().rev().collect();
+    let mut command_position = true;
+    let mut visited: Vec<String> = Vec::new();
+
+    while let Some(tok) = pending.pop() {
+        if command_position {
+            if let Token::Word(w) = &tok {
+                if !visited.contains(w) {
+                    if let Some(val) = shell.aliases.get(w).cloned() {
+                        visited.push(w.clone());
+                        let mut sub = Tokenizer::new(&val);
+                        if let Ok(sub_tokens) = sub.tokenize() {
+                            for st in sub_tokens.into_iter().rev() {
+                                pending.push(st);
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+        visited.clear();
+        command_position = matches!(tok, Token::Semicolon | Token::And | Token::Or | Token::Pipe | Token::Background);
+        result.push(tok);
+    }
+    result
 }
 
 // =============================================================================
@@ -3319,6 +3401,7 @@ fn exec_line(line: &str, shell: &mut Shell) -> i32 {
     if tokens.is_empty() {
         return shell.last_exit;
     }
+    let tokens = expand_alias_tokens(tokens, shell);
     let nodes = match parse(&tokens) {
         Ok(n) => n,
         Err(e) => {
@@ -3379,108 +3462,11 @@ fn exec_simple(simple: &Simple, shell: &mut Shell) -> i32 {
         return exec_redirect_only(simple, shell);
     }
 
-    let simple = expand_aliases(simple, shell);
-
     let cmd_name = &simple.args[0];
     if is_builtin(cmd_name, shell) {
-        return exec_builtin_with_redirects(&simple, shell);
+        return exec_builtin_with_redirects(simple, shell);
     }
-    exec_external(&simple, shell)
-}
-
-fn expand_aliases<'a>(simple: &'a Simple, shell: &Shell) -> std::borrow::Cow<'a, Simple> {
-    let mut visited = Vec::new();
-    let mut current: std::borrow::Cow<'a, Simple> = std::borrow::Cow::Borrowed(simple);
-    loop {
-        let cmd_name = &current.args[0];
-        if visited.contains(cmd_name) {
-            break;
-        }
-        let alias_val = match shell.aliases.get(cmd_name) {
-            Some(v) => v.clone(),
-            None => break,
-        };
-        visited.push(cmd_name.clone());
-        let new_args = split_alias_words(&alias_val);
-        let mut args = Vec::with_capacity(new_args.len() + current.args.len() - 1);
-        args.extend(new_args);
-        args.extend(current.args[1..].iter().cloned());
-        current = std::borrow::Cow::Owned(Simple {
-            args,
-            redirects: current.redirects.clone(),
-        });
-    }
-    current
-}
-
-fn split_alias_words(s: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut chars = s.chars().peekable();
-    loop {
-        while let Some(&c) = chars.peek() {
-            if c.is_ascii_whitespace() {
-                chars.next();
-            } else {
-                break;
-            }
-        }
-        if chars.peek().is_none() {
-            break;
-        }
-        let word = match chars.peek() {
-            Some('\'') => {
-                chars.next();
-                let mut w = String::new();
-                loop {
-                    match chars.next() {
-                        Some('\'') => break,
-                        Some(c) => w.push(c),
-                        None => break,
-                    }
-                }
-                w
-            }
-            Some('"') => {
-                chars.next();
-                let mut w = String::new();
-                loop {
-                    match chars.next() {
-                        Some('"') => break,
-                        Some('\\') => {
-                            match chars.next() {
-                                Some('$') => w.push('$'),
-                                Some('`') => w.push('`'),
-                                Some('"') => w.push('"'),
-                                Some('\\') => w.push('\\'),
-                                Some('\n') => {}
-                                Some(c) => {
-                                    w.push('\\');
-                                    w.push(c);
-                                }
-                                None => w.push('\\'),
-                            }
-                        }
-                        Some(c) => w.push(c),
-                        None => break,
-                    }
-                }
-                w
-            }
-            _ => {
-                let mut w = String::new();
-                while let Some(&c) = chars.peek() {
-                    if c.is_ascii_whitespace() || c == '\'' || c == '"' {
-                        break;
-                    }
-                    w.push(c);
-                    chars.next();
-                }
-                w
-            }
-        };
-        words.push(word);
-    }
-    words
+    exec_external(simple, shell)
 }
 
 fn exec_external(simple: &Simple, shell: &Shell) -> i32 {
@@ -3699,8 +3685,7 @@ fn exec_pipeline(cmds: &[Simple], shell: &Shell) -> i32 {
 
     prepare_job_terminal(shell);
 
-    for (i, raw_simple) in cmds.iter().enumerate() {
-        let simple = expand_aliases(raw_simple, shell);
+    for (i, simple) in cmds.iter().enumerate() {
         let cmd_name = &simple.args[0];
 
         if is_builtin(cmd_name, shell) {
@@ -3729,7 +3714,7 @@ fn exec_pipeline(cmds: &[Simple], shell: &Shell) -> i32 {
                         unsafe { libc::close(rfd); libc::close(wfd); }
                     }
                     let mut shell_copy = clone_shell(shell);
-                    let code = exec_builtin_with_redirects(&simple, &mut shell_copy);
+                    let code = exec_builtin_with_redirects(simple, &mut shell_copy);
                     io::stdout().flush().ok();
                     io::stderr().flush().ok();
                     process::exit(code);
@@ -3753,7 +3738,7 @@ fn exec_pipeline(cmds: &[Simple], shell: &Shell) -> i32 {
         };
 
         let mut cmd = Command::new(&program);
-        let expanded = expand_simple(&simple, shell);
+        let expanded = expand_simple(simple, shell);
         if !expanded.args.is_empty() {
             cmd.args(&expanded.args[1..]);
         }
@@ -3818,8 +3803,6 @@ fn exec_pipeline_simple(simple: &Simple, shell: &Shell) -> i32 {
         return exec_redirect_only(simple, shell);
     }
 
-    let simple = expand_aliases(simple, shell);
-
     let cmd_name = &simple.args[0];
     if is_builtin(cmd_name, shell) {
         let mut shell_copy = clone_shell(shell);
@@ -3832,7 +3815,7 @@ fn exec_pipeline_simple(simple: &Simple, shell: &Shell) -> i32 {
         }
         return exec_builtin(&expanded, &mut shell_copy);
     }
-    exec_external(&simple, shell)
+    exec_external(simple, shell)
 }
 
 fn exec_background(simple: &Simple, shell: &mut Shell) -> i32 {
@@ -4376,6 +4359,13 @@ fn main() {
     } else {
         None
     };
+
+    // Resolve terminal capabilities once up front, during startup latency
+    // that's already happening, rather than surprising the first keystroke
+    // of the session with the (small, one-time) cost of spawning `tput`.
+    if interactive {
+        term_caps();
+    }
 
     let config_path = env::var("HOME").ok()
         .map(|h| Path::new(&h).join(".config").join("btsh").join("config"));
