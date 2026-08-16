@@ -405,21 +405,29 @@ impl History {
         if entry.is_empty() {
             return;
         }
-        if self.entries.last().map_or(false, |last| *last == entry) {
+        if self.entries.last().is_some_and(|last| *last == entry) {
+            // Already the most recent entry -- nothing to move.
             return;
         }
-        if let Some(ref p) = self.path {
-            if let Ok(f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-            {
-                use std::io::Write;
-                writeln!(&f, "{entry}").ok();
-            }
+        let existed_before = self.entries.iter().any(|e| *e == entry);
+        if existed_before {
+            // Re-running an earlier command should make it the newest
+            // entry, not leave a stale duplicate sitting wherever it first
+            // ran -- otherwise pressing Up after running it again still
+            // shows the old one in its old spot instead of what you just did.
+            self.entries.retain(|e| *e != entry);
         }
         self.entries.push(entry);
         self.index = self.entries.len();
+
+        if let Some(ref p) = self.path {
+            if existed_before {
+                let content: String = self.entries.iter().map(|e| format!("{e}\n")).collect();
+                std::fs::write(p, content).ok();
+            } else if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                writeln!(&mut f, "{}", self.entries.last().unwrap()).ok();
+            }
+        }
     }
 
     fn up(&mut self, current: &str) -> Option<String> {
@@ -2337,12 +2345,11 @@ fn exec_builtin_rm(simple: &Simple, _shell: &Shell) -> i32 {
             let suffix = if Path::new(file).is_dir() { "directory" } else { "regular file" };
             print!("btsh: rm: remove {suffix} '{file}'? [y/n] ");
             io::stdout().flush().ok();
-            loop {
-                let mut buf = [0u8; 1];
-                let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr() as *mut libc::c_void, 1) };
-                if n != 1 { break; }
+            let mut buf = [0u8; 1];
+            let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+            if n == 1 {
                 match buf[0] {
-                    b'y' | b'Y' | b'\r' | b'\n' => { eprintln!(); break; }
+                    b'y' | b'Y' | b'\r' | b'\n' => { eprintln!(); }
                     _ => { eprintln!("  skipped"); continue 'file; }
                 }
             }
@@ -2895,7 +2902,7 @@ fn exec_builtin_shit(_simple: &Simple, shell: &mut Shell) -> i32 {
     }
 
     let code = exec_line(&fix, shell);
-    if code != 127 && shell.history && !shell.fresh {
+    if shell.history && !shell.fresh {
         if let Ok(mut h) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -4461,7 +4468,7 @@ fn main() {
         shell.last_exit = exec_line(trimmed, &mut shell);
         log_command(&shell, trimmed);
 
-        if shell.history && !trimmed.starts_with('#') && shell.last_exit != 127 {
+        if shell.history && !trimmed.starts_with('#') {
             history.add(trimmed);
         }
     }
