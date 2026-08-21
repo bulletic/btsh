@@ -47,6 +47,8 @@ enum Node {
     Or(Box<Node>, Box<Node>),
 }
 
+const DEFAULT_SUBCMD_COLOR: &str = "cyan";
+
 struct Shell {
     last_exit: i32,
     last_bg_pid: Option<u32>,
@@ -61,6 +63,8 @@ struct Shell {
     shit: bool,
     history: bool,
     autosuggest: bool,
+    subcmd_color_on: bool,
+    subcmd_color: String,
     fresh: bool,
 }
 
@@ -665,7 +669,7 @@ fn terminal_width() -> usize {
     }
 }
 
-fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> ReadLineResult {
+fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool, highlight: Option<&str>) -> ReadLineResult {
     let orig_prompt_width = prompt_last_line_width(prompt);
     let orig_last_prompt_line = prompt.lines().next_back().unwrap_or("");
     let prompt_line_count = prompt.lines().count().max(1);
@@ -719,7 +723,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
 
         if winch_pending() {
             term_width = terminal_width();
-            prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+            prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
             out.flush();
             continue;
         }
@@ -760,7 +764,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
             Some(Key::Char(c)) => {
                 if matches!(c, '"' | '\'' | ')' | ']' | '}') && line[cursor..].chars().next() == Some(c) {
                     cursor += c.len_utf8();
-                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                     out.flush();
                     continue;
                 }
@@ -777,7 +781,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                     line.insert(cursor, cl);
                 }
                 suggestion = suggest_command_opt(&line, &history, suggest);
-                prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                 out.flush();
             }
             Some(Key::Backspace) => {
@@ -786,7 +790,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                     cursor -= prev.len_utf8();
                     line.remove(cursor);
                     suggestion = suggest_command_opt(&line, &history, suggest);
-                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                     out.flush();
                 }
             }
@@ -794,7 +798,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                 if cursor < line.len() {
                     line.remove(cursor);
                     suggestion = suggest_command_opt(&line, &history, suggest);
-                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                     out.flush();
                 }
             }
@@ -802,7 +806,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                 if cursor > 0 {
                     let prev = line[..cursor].chars().next_back().unwrap();
                     cursor -= prev.len_utf8();
-                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                     out.flush();
                 }
             }
@@ -810,7 +814,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                 if cursor < line.len() {
                     let next = line[cursor..].chars().next().unwrap();
                     cursor += next.len_utf8();
-                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                     out.flush();
                 } else if let Some(sug) = &suggestion {
                     if !sug.is_empty() {
@@ -818,19 +822,19 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                         line.push(c);
                         cursor = line.len();
                         suggestion = suggest_command_opt(&line, &history, suggest);
-                        prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                        prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                         out.flush();
                     }
                 }
             }
             Some(Key::Home) => {
                 cursor = 0;
-                prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                 out.flush();
             }
             Some(Key::End) => {
                 cursor = line.len();
-                prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                 out.flush();
             }
             Some(Key::Up) => {
@@ -838,7 +842,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                     line = hist_line;
                     cursor = line.len();
                     suggestion = suggest_command_opt(&line, &history, suggest);
-                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                     out.flush();
                 }
             }
@@ -847,7 +851,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                     line = hist_line;
                     cursor = line.len();
                     suggestion = suggest_command_opt(&line, &history, suggest);
-                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                    prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                     out.flush();
                 }
             }
@@ -871,7 +875,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                     out.s(prompt);
                     origin_row = Some(prompt_line_count.saturating_sub(1));
                 }
-                prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                 out.flush();
             }
             Some(Key::Tab) => {
@@ -880,7 +884,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                         line.push_str(sug);
                         cursor = line.len();
                         suggestion = suggest_command_opt(&line, &history, suggest);
-                        prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
+                        prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref(), highlight);
                         out.flush();
                     }
                 }
@@ -951,7 +955,28 @@ fn move_cursor(out: &mut Out, from_row: usize, target_row: usize, target_col: us
     }
 }
 
-fn refresh_line(out: &mut Out, origin_row: Option<usize>, prompt_width: usize, last_line: &str, line: &str, cursor: usize, prev_lines: usize, term_width: usize, suggestion: Option<&str>) -> usize {
+// Byte index just past the first whitespace-delimited token of `line`, when
+// at least one character follows it -- i.e. where "everything after the main
+// command" begins. Leading whitespace stays plain; a line that is only one
+// token (or only whitespace) colors nothing.
+fn first_arg_boundary(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    let start = i;
+    while i < bytes.len() && bytes[i] != b' ' && bytes[i] != b'\t' {
+        i += 1;
+    }
+    if i > start && i < bytes.len() {
+        Some(i)
+    } else {
+        None
+    }
+}
+
+fn refresh_line(out: &mut Out, origin_row: Option<usize>, prompt_width: usize, last_line: &str, line: &str, cursor: usize, prev_lines: usize, term_width: usize, suggestion: Option<&str>, highlight: Option<&str>) -> usize {
     match origin_row {
         Some(row) => {
             out.s("\x1b[");
@@ -965,7 +990,18 @@ fn refresh_line(out: &mut Out, origin_row: Option<usize>, prompt_width: usize, l
     }
     out.s(&term_caps().erase_to_end);
     out.s(last_line);
-    out.s(line);
+    // The escape codes injected here never enter `line` itself, so the width
+    // math below (which measures `line` and its slices) stays correct without
+    // needing ANSI-aware counting.
+    match highlight.and_then(|_| first_arg_boundary(line)) {
+        Some(b) => {
+            out.s(&line[..b]);
+            out.s(highlight.unwrap());
+            out.s(&line[b..]);
+            out.s("\x1b[0m");
+        }
+        None => out.s(line),
+    }
     let sug = suggestion.filter(|_| cursor == line.len());
     if let Some(s) = sug {
         out.s(&term_caps().dim);
@@ -2242,6 +2278,60 @@ fn persist_autosuggest_to_config(shell: &Shell, enabled: bool) {
     persist_bool_to_config(shell, "auto-suggestion", enabled);
 }
 
+// Unlike the boolean features, this key's value varies ("on", "off", or a
+// color name), so existing lines are matched by prefix rather than by exact
+// string. Canonical stored forms: "off", "on" (enabled with the default
+// color), or a bare color name (enabled with that color).
+fn persist_subcmd_color_to_config(shell: &Shell) {
+    let path = match shell.config_path {
+        Some(ref p) => p.clone(),
+        None => return,
+    };
+    let value = if shell.subcmd_color_on {
+        if shell.subcmd_color == DEFAULT_SUBCMD_COLOR {
+            "on".to_string()
+        } else {
+            shell.subcmd_color.clone()
+        }
+    } else {
+        "off".to_string()
+    };
+    let line = format!("sub-command-color {value}");
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        String::new()
+    });
+    let replaced: Vec<String> = content.lines()
+        .map(|l| {
+            let trimmed = l.trim();
+            if trimmed.starts_with("sub-command-color ") || trimmed == "sub-command-color" {
+                line.clone()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    let has_existing = content.lines().any(|l| {
+        let t = l.trim();
+        t.starts_with("sub-command-color ") || t == "sub-command-color"
+    });
+    let mut out = if has_existing {
+        replaced.join("\n")
+    } else if content.is_empty() {
+        format!("{line}\n")
+    } else if content.ends_with('\n') {
+        format!("{content}{line}\n")
+    } else {
+        format!("{content}\n{line}\n")
+    };
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    std::fs::write(&path, &out).ok();
+}
+
 fn remove_alias_from_config(shell: &Shell, name: &str) {
     let path = match shell.config_path {
         Some(ref p) => p.clone(),
@@ -2388,15 +2478,25 @@ fn exec_builtin_rm(simple: &Simple, _shell: &Shell) -> i32 {
     let interactive = unsafe { libc::isatty(libc::STDIN_FILENO) != 0 };
 
     if has_f {
+        // POSIX -f: non-existent operands are ignored silently and don't
+        // affect the exit status; anything else still fails loudly.
+        let mut code = 0;
         for file in &files {
-            delete_path(file, has_r);
+            if let Err(e) = delete_path(file, has_r) {
+                if e.kind() != io::ErrorKind::NotFound {
+                    eprintln!("btsh: rm: {file}: {e}");
+                    code = 1;
+                }
+            }
         }
-        return 0;
+        return code;
     }
 
+    let mut code = 0;
     'file: for file in &files {
         if !Path::new(file).exists() {
-            eprintln!("btsh: rm: {file}: No such file");
+            eprintln!("btsh: rm: {file}: No such file or directory");
+            code = 1;
             continue;
         }
         if interactive {
@@ -2412,22 +2512,26 @@ fn exec_builtin_rm(simple: &Simple, _shell: &Shell) -> i32 {
                 }
             }
         }
-        delete_path(file, has_r);
+        if let Err(e) = delete_path(file, has_r) {
+            eprintln!("btsh: rm: {file}: {e}");
+            code = 1;
+        }
     }
-    0
+    code
 }
 
-fn delete_path(path: &str, recursive: bool) {
+fn delete_path(path: &str, recursive: bool) -> io::Result<()> {
     let p = Path::new(path);
-    if p.is_dir() {
-        if recursive {
-            std::fs::remove_dir_all(path).ok();
-        } else {
-            eprintln!("btsh: rm: {path}: is a directory");
-        }
+    // is_dir() follows symlinks, so check is_symlink() first: a symlink to a
+    // directory is itself unlinked like any file, same as GNU/BSD rm.
+    if p.is_symlink() || !p.is_dir() {
+        std::fs::remove_file(path)?;
+    } else if recursive {
+        std::fs::remove_dir_all(path)?;
     } else {
-        std::fs::remove_file(path).ok();
+        return Err(io::Error::other("is a directory"));
     }
+    Ok(())
 }
 
 fn exec_builtin_source(simple: &Simple, shell: &mut Shell) -> i32 {
@@ -2995,6 +3099,7 @@ fn exec_builtin_btshctl(simple: &Simple, shell: &mut Shell) -> i32 {
             "shit" => exec_btshctl_shit(&simple.args[2..], shell),
             "history" => exec_btshctl_history(&simple.args[2..], shell),
             "auto-suggestion" => exec_btshctl_autosuggest(&simple.args[2..], shell),
+            "sub-command-color" => exec_btshctl_subcmd_color(&simple.args[2..], shell),
             "--fresh" => exec_btshctl_shell(&simple.args[2..], shell),
             "--help" => exec_btshctl_help(),
             sub => {
@@ -3018,6 +3123,7 @@ fn exec_btshctl_help() -> i32 {
     println!("Features:");
     println!("┝ logging, off by default, logs commands for debugging(at /tmp/btsh_debug.log)");
     println!("┝ auto-suggestion, on by default, suggest command or path completions");
+    println!("┝ sub-command-color, off by default, colors arguments after the main command while typing");
     println!("┝ history, on by default, saves commands to history");
     println!("┕ shit, on by default, if launched it tries to correct the last command");
     0
@@ -3049,8 +3155,14 @@ fn exec_btshctl_enable(args: &[String], shell: &mut Shell) -> i32 {
             println!("auto-suggestion enabled");
             0
         }
+        [sub] if sub == "sub-command-color" => {
+            shell.subcmd_color_on = true;
+            persist_subcmd_color_to_config(shell);
+            println!("sub-command-color enabled");
+            0
+        }
         _ => {
-            eprintln!("usage: btshctl enable logging|shit|history|auto-suggestion");
+            eprintln!("usage: btshctl enable logging|shit|history|auto-suggestion|sub-command-color");
             1
         }
     }
@@ -3082,8 +3194,14 @@ fn exec_btshctl_disable(args: &[String], shell: &mut Shell) -> i32 {
             println!("auto-suggestion disabled");
             0
         }
+        [sub] if sub == "sub-command-color" => {
+            shell.subcmd_color_on = false;
+            persist_subcmd_color_to_config(shell);
+            println!("sub-command-color disabled");
+            0
+        }
         _ => {
-            eprintln!("usage: btshctl disable logging|shit|history|auto-suggestion");
+            eprintln!("usage: btshctl disable logging|shit|history|auto-suggestion|sub-command-color");
             1
         }
     }
@@ -3112,8 +3230,14 @@ fn exec_btshctl_status(args: &[String], shell: &Shell) -> i32 {
             println!("auto-suggestion: {state}");
             0
         }
+        [sub] if sub == "sub-command-color" => {
+            let state = if shell.subcmd_color_on { "enabled" } else { "disabled (default)" };
+            println!("sub-command-color: {state}");
+            println!("color: {}", shell.subcmd_color);
+            0
+        }
         _ => {
-            eprintln!("usage: btshctl status logging|shit|history|auto-suggestion");
+            eprintln!("usage: btshctl status logging|shit|history|auto-suggestion|sub-command-color");
             1
         }
     }
@@ -3127,7 +3251,8 @@ fn exec_btshctl_logging(_args: &[String], shell: &mut Shell) -> i32 {
     println!("type q or exit to exit");
     let mut history = History { entries: Vec::new(), index: 0, saved: String::new(), path: None };
     loop {
-        match read_line_interactive("   ? ", &mut history, shell.autosuggest) {
+        let hl = subcmd_highlight(shell);
+        match read_line_interactive("   ? ", &mut history, shell.autosuggest, hl.as_deref()) {
             ReadLineResult::Line(line) => {
                 let cmd = line.trim();
                 if cmd.is_empty() {
@@ -3205,7 +3330,8 @@ fn exec_btshctl_shit(_args: &[String], shell: &mut Shell) -> i32 {
     println!("type q or exit to exit");
     let mut history = History { entries: Vec::new(), index: 0, saved: String::new(), path: None };
     loop {
-        match read_line_interactive("   ? ", &mut history, shell.autosuggest) {
+        let hl = subcmd_highlight(shell);
+        match read_line_interactive("   ? ", &mut history, shell.autosuggest, hl.as_deref()) {
             ReadLineResult::Line(line) => {
                 let cmd = line.trim();
                 if cmd.is_empty() {
@@ -3255,7 +3381,8 @@ fn exec_btshctl_history(_args: &[String], shell: &mut Shell) -> i32 {
     println!("type q or exit to exit");
     let mut history = History { entries: Vec::new(), index: 0, saved: String::new(), path: None };
     loop {
-        match read_line_interactive("   ? ", &mut history, shell.autosuggest) {
+        let hl = subcmd_highlight(shell);
+        match read_line_interactive("   ? ", &mut history, shell.autosuggest, hl.as_deref()) {
             ReadLineResult::Line(line) => {
                 let cmd = line.trim();
                 if cmd.is_empty() {
@@ -3334,7 +3461,8 @@ fn exec_btshctl_autosuggest(_args: &[String], shell: &mut Shell) -> i32 {
     println!("type q or exit to exit");
     let mut history = History { entries: Vec::new(), index: 0, saved: String::new(), path: None };
     loop {
-        match read_line_interactive("   ? ", &mut history, shell.autosuggest) {
+        let hl = subcmd_highlight(shell);
+        match read_line_interactive("   ? ", &mut history, shell.autosuggest, hl.as_deref()) {
             ReadLineResult::Line(line) => {
                 let cmd = line.trim();
                 if cmd.is_empty() {
@@ -3410,6 +3538,71 @@ fn btshctl_autosuggest_help() {
     println!("    !   enable       enable auto-suggestion");
     println!("    !   disable      disable auto-suggestion");
     println!("    !   status       show if on or off");
+    println!("    !   q / exit     leave this shell");
+}
+
+fn exec_btshctl_subcmd_color(_args: &[String], shell: &mut Shell) -> i32 {
+    if unsafe { libc::isatty(libc::STDIN_FILENO) == 0 } {
+        eprintln!("btsh: btshctl: sub-command-color: interactive-only command");
+        return 1;
+    }
+    println!("type q or exit to exit");
+    let mut history = History { entries: Vec::new(), index: 0, saved: String::new(), path: None };
+    loop {
+        let hl = subcmd_highlight(shell);
+        match read_line_interactive("   ? ", &mut history, shell.autosuggest, hl.as_deref()) {
+            ReadLineResult::Line(line) => {
+                let cmd = line.trim();
+                if cmd.is_empty() {
+                    continue;
+                }
+                match cmd {
+                    "help" => btshctl_subcmd_color_help(),
+                    "enable" => {
+                        shell.subcmd_color_on = true;
+                        persist_subcmd_color_to_config(shell);
+                        println!("    ! enabled");
+                    }
+                    "disable" => {
+                        shell.subcmd_color_on = false;
+                        persist_subcmd_color_to_config(shell);
+                        println!("    ! disabled");
+                    }
+                    "status" => {
+                        println!("    ! {} ({})", if shell.subcmd_color_on { "on" } else { "off" }, shell.subcmd_color);
+                    }
+                    rest if rest.starts_with("set ") || rest == "set" => {
+                        let name = rest[3..].trim();
+                        if color_to_ansi(name).is_some() {
+                            shell.subcmd_color = name.to_lowercase();
+                            if shell.subcmd_color_on {
+                                persist_subcmd_color_to_config(shell);
+                            }
+                            println!("    ! color set to {}", shell.subcmd_color);
+                        } else {
+                            println!("    ! unknown color: {name}");
+                        }
+                    }
+                    "q" | "exit" | "quit" => break,
+                    other => println!("    ! unknown command: {other}"),
+                }
+            }
+            ReadLineResult::CtrlC | ReadLineResult::Eof => {
+                println!();
+                break;
+            }
+        }
+    }
+    0
+}
+
+fn btshctl_subcmd_color_help() {
+    println!("    ! sub-command-color commands:");
+    println!("    !   help         show this help");
+    println!("    !   enable       color arguments after the main command while typing");
+    println!("    !   disable      stop coloring arguments");
+    println!("    !   status       show if on or off, and the active color");
+    println!("    !   set COLOR    pick the color (black red green yellow blue magenta cyan white bold dim italic underline blink)");
     println!("    !   q / exit     leave this shell");
 }
 
@@ -3712,6 +3905,8 @@ fn clone_shell(shell: &Shell) -> Shell {
         shit: shell.shit,
         history: shell.history,
         autosuggest: shell.autosuggest,
+        subcmd_color_on: shell.subcmd_color_on,
+        subcmd_color: shell.subcmd_color.clone(),
         fresh: shell.fresh,
     }
 }
@@ -3976,6 +4171,7 @@ fn reap_background(shell: &mut Shell) {
 // shit on
 // history on
 // auto-suggestion on
+// sub-command-color off
 
 enum ConfigLine {
     Echo(Vec<String>),
@@ -3990,6 +4186,8 @@ struct Config {
     shit: bool,
     history: bool,
     autosuggest: bool,
+    subcmd_color_on: bool,
+    subcmd_color_name: String,
 }
 
 fn load_config() -> Option<Config> {
@@ -4010,6 +4208,8 @@ fn load_config() -> Option<Config> {
     let mut shit = true;
     let mut history = true;
     let mut autosuggest = true;
+    let mut subcmd_color_on = false;
+    let mut subcmd_color_name = DEFAULT_SUBCMD_COLOR.to_string();
 
     let mut i = 0;
     while i < lines.len() {
@@ -4061,11 +4261,21 @@ fn load_config() -> Option<Config> {
             history = val.trim() == "on";
         } else if let Some(val) = line.strip_prefix("auto-suggestion ") {
             autosuggest = val.trim() == "on";
+        } else if let Some(val) = line.strip_prefix("sub-command-color ") {
+            let val = val.trim();
+            if val == "on" {
+                subcmd_color_on = true;
+            } else if val == "off" {
+                subcmd_color_on = false;
+            } else if color_to_ansi(val).is_some() {
+                subcmd_color_on = true;
+                subcmd_color_name = val.to_lowercase();
+            }
         }
         i += 1;
     }
 
-    Some(Config { prompt_lines, aliases, paths, if_interactive_lines, logging, shit, history, autosuggest })
+    Some(Config { prompt_lines, aliases, paths, if_interactive_lines, logging, shit, history, autosuggest, subcmd_color_on, subcmd_color_name })
 }
 
 fn parse_config_line(line: &str) -> Option<ConfigLine> {
@@ -4338,6 +4548,17 @@ fn color_to_ansi(name: &str) -> Option<String> {
     Some(format!("\x1b[{code}m"))
 }
 
+// ANSI start sequence for sub-command coloring, when the feature is on and
+// the configured color name resolves. Recomputed per prompt so live changes
+// (btshctl set/enable/disable) apply immediately.
+fn subcmd_highlight(shell: &Shell) -> Option<String> {
+    if shell.subcmd_color_on {
+        color_to_ansi(&shell.subcmd_color)
+    } else {
+        None
+    }
+}
+
 // =============================================================================
 // Main
 // =============================================================================
@@ -4347,14 +4568,17 @@ fn main() {
 
     let fresh = args.len() >= 2 && args[1] == "--fresh";
 
-    let (logging_on, shit_on, history_on, autosuggest_on) = if fresh {
-        (false, true, true, true)
+    let (logging_on, shit_on, history_on, autosuggest_on, subcmd_color_on, subcmd_color_name) = if fresh {
+        (false, true, true, true, false, DEFAULT_SUBCMD_COLOR.to_string())
     } else {
+        let cfg = load_config();
         (
-            load_config().map(|c| c.logging).unwrap_or(false),
-            load_config().map(|c| c.shit).unwrap_or(true),
-            load_config().map(|c| c.history).unwrap_or(true),
-            load_config().map(|c| c.autosuggest).unwrap_or(true),
+            cfg.as_ref().map(|c| c.logging).unwrap_or(false),
+            cfg.as_ref().map(|c| c.shit).unwrap_or(true),
+            cfg.as_ref().map(|c| c.history).unwrap_or(true),
+            cfg.as_ref().map(|c| c.autosuggest).unwrap_or(true),
+            cfg.as_ref().map(|c| c.subcmd_color_on).unwrap_or(false),
+            cfg.map(|c| c.subcmd_color_name).unwrap_or_else(|| DEFAULT_SUBCMD_COLOR.to_string()),
         )
     };
 
@@ -4383,6 +4607,8 @@ fn main() {
             shit: shit_on,
             history: history_on,
             autosuggest: autosuggest_on,
+            subcmd_color_on,
+            subcmd_color: subcmd_color_name.clone(),
             fresh: false,
         };
         if let Some(ref cfg) = load_config() {
@@ -4449,6 +4675,8 @@ fn main() {
         shit: shit_on,
         history: history_on,
         autosuggest: autosuggest_on,
+        subcmd_color_on,
+        subcmd_color: subcmd_color_name,
         fresh,
     };
 
@@ -4499,7 +4727,8 @@ fn main() {
             } else {
                 render_prompt(&shell)
             };
-            match read_line_interactive(&prompt, &mut history, shell.autosuggest) {
+            let hl = subcmd_highlight(&shell);
+            match read_line_interactive(&prompt, &mut history, shell.autosuggest, hl.as_deref()) {
                 ReadLineResult::Line(l) => l,
                 ReadLineResult::CtrlC => {
                     // This shouldn't be reached since we handle Ctrl+C inside read_line_interactive
@@ -4640,5 +4869,44 @@ mod tests {
 
         let tokens = Tokenizer::new("echo hi | cat").tokenize().unwrap();
         assert!(parse(&tokens).is_ok());
+    }
+
+    #[test]
+    fn delete_path_reports_errors() {
+        let base = std::env::temp_dir().join(format!("btsh_rm_test_{}", process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        // Non-existent operand -> NotFound error, never a silent Ok.
+        assert_eq!(delete_path(base.join("missing").to_str().unwrap(), false).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(delete_path(base.join("missing").to_str().unwrap(), true).unwrap_err().kind(), io::ErrorKind::NotFound);
+
+        // Directory without -r -> "is a directory"; with -r -> deleted.
+        let dir = base.join("dir");
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        let dir_s = dir.to_str().unwrap();
+        assert_eq!(delete_path(dir_s, false).unwrap_err().to_string(), "is a directory");
+        assert!(dir.exists());
+        delete_path(dir_s, true).unwrap();
+        assert!(!dir.exists());
+
+        // Regular file deletes fine.
+        let file = base.join("file");
+        std::fs::write(&file, b"x").unwrap();
+        delete_path(file.to_str().unwrap(), false).unwrap();
+        assert!(!file.exists());
+
+        // Symlink to a directory unlinks like a file, no -r needed.
+        let target = base.join("symtarget");
+        std::fs::create_dir_all(&target).unwrap();
+        #[cfg(unix)]
+        {
+            let link = base.join("symlink");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            delete_path(link.to_str().unwrap(), false).unwrap();
+            assert!(!link.exists());
+            assert!(target.exists());
+        }
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

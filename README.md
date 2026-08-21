@@ -110,6 +110,20 @@ Prompt escapes: `\w` current directory, `\W` basename, `\u` user, `\h` host,
 
 `prompt-on-failure on|off` (default: `on`) - When enabled, the prompt turns red if the last command failed (non-zero exit code). Disable to keep the prompt color unchanged regardless of command exit status.
 
+`sub-command-color <on|off|color>` (default: `off`) - When enabled, everything you type after the main command (flags, subcommands, arguments) is rendered in color while typing:
+
+```sh
+# Turn it on with the default color (cyan)
+btshctl enable sub-command-color
+
+# Or pick a specific one
+btshctl sub-command-color        # opens its config shell
+set magenta
+q
+```
+
+Colors: black red green yellow blue magenta cyan white bold dim italic underline blink.
+
 ## License
 
 btsh is licensed under the MIT License.
