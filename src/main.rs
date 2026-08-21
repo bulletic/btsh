@@ -1835,6 +1835,12 @@ fn parse_pipeline(tokens: &[Token], start: usize) -> Result<(Node, usize), Strin
 
     loop {
         let (simple, consumed) = parse_simple(tokens, i)?;
+        // A stage after a pipe must have a command word -- a bare redirect
+        // (`echo hi |>f`) has no program to spawn, and letting it through
+        // would crash the pipeline executor on its empty args.
+        if !cmds.is_empty() && simple.args.is_empty() {
+            return Err("expected command".into());
+        }
         cmds.push(simple);
         i += consumed;
 
@@ -4617,6 +4623,22 @@ mod tests {
         assert!(parse(&tokens).is_err());
 
         let tokens = Tokenizer::new("2>f").tokenize().unwrap();
+        assert!(parse(&tokens).is_ok());
+    }
+
+    #[test]
+    fn redirect_only_stage_after_pipe_is_parse_error() {
+        let tokens = Tokenizer::new("echo hi |>f").tokenize().unwrap();
+        assert!(parse(&tokens).is_err());
+
+        let tokens = Tokenizer::new("echo hi | <in").tokenize().unwrap();
+        assert!(parse(&tokens).is_err());
+
+        // A leading redirect-only command (no pipe) stays legal.
+        let tokens = Tokenizer::new(">f").tokenize().unwrap();
+        assert!(parse(&tokens).is_ok());
+
+        let tokens = Tokenizer::new("echo hi | cat").tokenize().unwrap();
         assert!(parse(&tokens).is_ok());
     }
 }
