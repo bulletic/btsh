@@ -666,9 +666,11 @@ fn terminal_width() -> usize {
 }
 
 fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> ReadLineResult {
-    let prompt_width = prompt_last_line_width(prompt);
-    let last_prompt_line = prompt.lines().next_back().unwrap_or("");
+    let orig_prompt_width = prompt_last_line_width(prompt);
+    let orig_last_prompt_line = prompt.lines().next_back().unwrap_or("");
     let prompt_line_count = prompt.lines().count().max(1);
+    let mut prompt_width = orig_prompt_width;
+    let mut last_prompt_line = orig_last_prompt_line;
     let mut term_width = terminal_width();
     let mut out = Out::new();
 
@@ -692,6 +694,7 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
     let mut cursor = 0;
     let mut prev_lines = 1usize;
     let mut suggestion: Option<String> = None;
+    let mut in_continuation = false;
 
     let result = loop {
         if sigint_pending() {
@@ -699,23 +702,17 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
             cursor = 0;
             prev_lines = 1;
             suggestion = None;
-            match origin_row {
-                Some(row) => {
-                    out.s("\x1b[");
-                    write_int(&mut out, row + 1);
-                    out.s(";1H");
-                    out.s(&term_caps().erase_to_end);
-                    out.s(last_prompt_line);
-                }
-                None => {
-                    if prompt_line_count > 1 {
-                        cursor_up(&mut out, prompt_line_count - 1);
-                    }
-                    out.c('\r');
-                    out.s(&term_caps().erase_to_end);
-                    out.s(prompt);
-                }
-            }
+            // A continuation prompt may have replaced these, and origin_row
+            // may anchor to a row that no longer lines up with the
+            // top-level prompt at all -- rather than reasoning about
+            // exactly where we were, do a full clear and reprint from a
+            // known-clean state, same as Ctrl+L.
+            last_prompt_line = orig_last_prompt_line;
+            prompt_width = orig_prompt_width;
+            in_continuation = false;
+            out.s(&term_caps().clear_screen);
+            out.s(prompt);
+            origin_row = Some(prompt_line_count.saturating_sub(1));
             out.flush();
             continue;
         }
@@ -732,6 +729,28 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
                 break ReadLineResult::Eof;
             }
             Some(Key::Enter) => {
+                if !is_line_complete(&line) {
+                    out.s(&line[cursor..]);
+                    if ends_in_unescaped_backslash(&line) {
+                        line.pop();
+                    } else {
+                        line.push('\n');
+                    }
+                    cursor = line.len();
+                    suggestion = None;
+                    out.s(&term_caps().erase_to_end);
+                    out.s("\r\n");
+                    let cont_prompt = "> ";
+                    out.s(cont_prompt);
+                    out.s("\x1b[6n");
+                    out.flush();
+                    last_prompt_line = cont_prompt;
+                    prompt_width = prompt_last_line_width(cont_prompt);
+                    origin_row = None;
+                    prev_lines = 1;
+                    in_continuation = true;
+                    continue;
+                }
                 out.s(&line[cursor..]);
                 out.s(&term_caps().erase_to_end);
                 out.s("\r\n");
@@ -845,8 +864,13 @@ fn read_line_interactive(prompt: &str, history: &mut History, suggest: bool) -> 
             }
             Some(Key::CtrlL) => {
                 out.s(&term_caps().clear_screen);
-                out.s(prompt);
-                origin_row = Some(prompt_line_count.saturating_sub(1));
+                if in_continuation {
+                    out.s(last_prompt_line);
+                    origin_row = Some(0);
+                } else {
+                    out.s(prompt);
+                    origin_row = Some(prompt_line_count.saturating_sub(1));
+                }
                 prev_lines = refresh_line(&mut out, origin_row, prompt_width, last_prompt_line, &line, cursor, prev_lines, term_width, suggestion.as_deref());
                 out.flush();
             }
@@ -1204,6 +1228,31 @@ impl<'a> Tokenizer<'a> {
                 None => return Err("unterminated double quote".into()),
             }
         }
+    }
+}
+
+// True if `line` ends in an odd number of trailing backslashes -- i.e. the
+// very last one is unescaped and is a continuation marker, not a literal
+// backslash argument.
+fn ends_in_unescaped_backslash(line: &str) -> bool {
+    line.chars().rev().take_while(|&c| c == '\\').count() % 2 == 1
+}
+
+// Whether `line` forms a complete command on its own, or whether the user
+// is still in the middle of typing one that spans multiple physical lines
+// (a trailing backslash, or an unclosed quote). Reuses the tokenizer's own
+// "unterminated ..." errors as the source of truth for the latter, rather
+// than re-implementing quote-tracking separately -- if the tokenizer would
+// need more input to finish, so does the line editor. Note: an unclosed
+// $(...) outside of quotes is not currently flagged by the tokenizer as
+// "unterminated" either, so that specific case isn't caught here.
+fn is_line_complete(line: &str) -> bool {
+    if ends_in_unescaped_backslash(line) {
+        return false;
+    }
+    match Tokenizer::new(line).tokenize() {
+        Ok(_) => true,
+        Err(e) => !e.contains("unterminated"),
     }
 }
 
@@ -1828,7 +1877,10 @@ fn parse_simple(tokens: &[Token], start: usize) -> Result<(Simple, usize), Strin
             Token::Word(w) => {
                 // Check for numeric fd prefix before a redirect operator
                 if i + 1 < tokens.len() && !w.is_empty() && w.chars().all(|c| c.is_ascii_digit()) {
-                    let fd: i32 = w.parse().unwrap();
+                    let fd: i32 = match w.parse() {
+                        Ok(fd) => fd,
+                        Err(_) => return Err(format!("{w}: invalid file descriptor")),
+                    };
                     let handled = match &tokens[i + 1] {
                         Token::Less => {
                             i += 2;
@@ -4557,5 +4609,14 @@ mod tests {
     fn no_braces() {
         assert_eq!(expand("plain word"), vec!["plain word"]);
         assert_eq!(expand(""), vec![""]);
+    }
+
+    #[test]
+    fn out_of_range_fd_redirect_is_parse_error_not_panic() {
+        let tokens = Tokenizer::new("99999999999>f").tokenize().unwrap();
+        assert!(parse(&tokens).is_err());
+
+        let tokens = Tokenizer::new("2>f").tokenize().unwrap();
+        assert!(parse(&tokens).is_ok());
     }
 }
